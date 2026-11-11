@@ -73,6 +73,10 @@ class DashboardWiringTest(unittest.TestCase):
         self.assertNotIn("readTrafficCounters", snapshot)
         self.assertNotIn("trafficRecordDao", self.web)
         self.assertIn("Copy recorder state only", self.source_patch)
+        status = self.web[self.web.index("private "): ]
+        self.assertIn("private fun status(", status,
+                      "HTTP status must read published state without suspending behind a sampler")
+        self.assertNotIn("TrafficRecorder.dashboardSnapshot()", self.web)
 
     def test_dashboard_reports_vpn_separately_and_expires_neighbours(self):
         self.assertIn("Upstreams.vpn.collect", self.web)
