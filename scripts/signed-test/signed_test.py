@@ -29,6 +29,25 @@ def run(*args, cwd=None, env=None):
     return result.stdout.strip()
 
 
+def verify_source_tree(source, info_path):
+    info = json.loads(info_path.read_text(encoding='utf-8'))
+    expected_tree = info.get('patched_tree')
+    if not re.fullmatch(r'[0-9a-f]{40}', expected_tree or ''):
+        raise ValueError('Missing or invalid patched source tree')
+    if run('git', 'write-tree', cwd=source) != expected_tree:
+        raise ValueError('Build changed the staged source tree')
+    if subprocess.run(('git', 'diff', '--quiet'), cwd=source).returncode:
+        raise ValueError('Build changed tracked source files')
+    submodule_state = run('git', 'submodule', 'status', '--recursive', cwd=source)
+    if any(line[:1] in '-+U' for line in submodule_state.splitlines()):
+        raise ValueError('A source submodule is not at its recorded clean commit')
+    submodule_changes = run('git', 'submodule', 'foreach', '--recursive',
+                            'git status --porcelain --untracked-files=all', cwd=source)
+    if submodule_changes:
+        raise ValueError('Build changed a source submodule')
+    print('Verified patched source tree and clean submodules')
+
+
 def api(path):
     request = urllib.request.Request('https://api.github.com/repos/' + UPSTREAM + '/' + path,
         headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'vpn-signed-test-ci',
@@ -169,7 +188,7 @@ def sign(apks, info_path, tools, output):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('prepare', 'verify', 'sign'))
+    parser.add_argument('action', choices=('prepare', 'verify', 'verify-source', 'sign'))
     parser.add_argument('--source', type=Path, default=Path('source'))
     parser.add_argument('--patch', type=Path, default=Path('maintenance/patches/0005-web-admin.patch'))
     parser.add_argument('--info', type=Path, default=Path('verified/build-info.json'))
@@ -181,6 +200,8 @@ def main():
         prepare(args.source, args.patch, args.info)
     elif args.action == 'verify':
         verify_unsigned(args.apks, args.info, args.tools)
+    elif args.action == 'verify-source':
+        verify_source_tree(args.source, args.info)
     else:
         sign(args.apks, args.info, args.tools, args.output)
 

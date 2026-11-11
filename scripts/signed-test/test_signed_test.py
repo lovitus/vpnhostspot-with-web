@@ -81,6 +81,38 @@ class SignedTestTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 m.resolve_trusted_source()
 
+    def test_source_tree_requires_exact_index_and_clean_worktree(self):
+        m = module()
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            info = root / 'build-info.json'
+            info.write_text('{"patched_tree": "' + 'a' * 40 + '"}\n', encoding='utf-8')
+            with mock.patch.object(m, 'run', side_effect=[
+                'a' * 40, ' 0162af698935100a590b7359581ac8b1b80693e5 external/aosp/hardware/interfaces'
+                , ''
+            ]) as run:
+                with mock.patch.object(m.subprocess, 'run', return_value=mock.Mock(returncode=0)):
+                    m.verify_source_tree(root, info)
+            self.assertEqual(run.call_args_list[0].args[:2], ('git', 'write-tree'))
+
+    def test_source_tree_rejects_index_worktree_or_submodule_changes(self):
+        m = module()
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            info = root / 'build-info.json'
+            info.write_text('{"patched_tree": "' + 'a' * 40 + '"}\n', encoding='utf-8')
+            cases = (
+                (['b' * 40], 0),
+                (['a' * 40, ' 0162af698935100a590b7359581ac8b1b80693e5 external/aosp/hardware/interfaces'], 1),
+                (['a' * 40, ' 0162af698935100a590b7359581ac8b1b80693e5 external/aosp/hardware/interfaces', ' M file'], 0),
+            )
+            for outputs, diff_status in cases:
+                with self.subTest(outputs=outputs, diff_status=diff_status):
+                    with mock.patch.object(m, 'run', side_effect=outputs):
+                        with mock.patch.object(m.subprocess, 'run', return_value=mock.Mock(returncode=diff_status)):
+                            with self.assertRaises(ValueError):
+                                m.verify_source_tree(root, info)
+
 
 if __name__ == '__main__':
     unittest.main()

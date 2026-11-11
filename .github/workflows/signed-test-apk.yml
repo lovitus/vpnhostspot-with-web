@@ -50,7 +50,7 @@ jobs:
           sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;29.0.14206865'
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
           rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
-          cargo install cargo-ndk --locked
+          cargo install cargo-ndk --version 4.1.2 --locked
       - name: Initialize pinned source submodules
         working-directory: source
         run: git submodule update --init --recursive --depth 1
@@ -59,7 +59,8 @@ jobs:
         run: |
           set -eu
           ./gradlew :mobile:verifyReleaseCoroutineDebugR8 :mobile:assembleRelease --no-daemon
-          git diff --exit-code
+      - name: Verify build source integrity and submodules
+        run: python3 maintenance/scripts/signed-test/signed_test.py verify-source
       - name: Check APK package, version and all four ABIs
         run: |
           set -eu
