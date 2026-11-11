@@ -1,6 +1,6 @@
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
 new file mode 100644
-index 00000000..d869ab12
+index 00000000..8f31c420
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
 @@ -0,0 +1,132 @@
@@ -133,9 +133,24 @@ index 00000000..d869ab12
 +        <!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>VPNHotspot</title>
 +        <style>body{font:16px system-ui;margin:24px;max-width:960px}table{border-collapse:collapse;width:100%}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:left}.muted{color:#777}</style>
 +        <h1>VPNHotspot</h1><p id=summary class=muted>loading...</p><table><thead><tr><th>Client</th><th>IP</th><th>↓</th><th>↑</th><th>Total</th></tr></thead><tbody id=clients></tbody></table>
-+        <script>async function refresh(){try{const s=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json());summary.textContent=`${s.gateway} · ${s.clientCount} clients · VPN ${s.vpn?'connected':'down'} · fallback ${s.fallback?'available':'down'}`;clients.textContent='';s.clients.forEach(c=>{const tr=document.createElement('tr');[c.mac,c.ip,`${c.receiveBytesPerSecond} B/s`,`${c.sendBytesPerSecond} B/s`,`${c.receiveBytes+c.sendBytes} B`].forEach(v=>{const td=document.createElement('td');td.textContent=v;tr.append(td)});clients.append(tr)})}catch(e){summary.textContent='status unavailable'}}refresh();setInterval(refresh,1000)</script>
++        <script>async function refresh(){try{const s=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json());summary.textContent=s.gateway+' · '+s.clientCount+' clients · VPN '+(s.vpn?'connected':'down')+' · fallback '+(s.fallback?'available':'down');clients.textContent='';s.clients.forEach(c=>{const tr=document.createElement('tr');[c.mac,c.ip,c.receiveBytesPerSecond+' B/s',c.sendBytesPerSecond+' B/s',(c.receiveBytes+c.sendBytes)+' B'].forEach(v=>{const td=document.createElement('td');td.textContent=v;tr.append(td)});clients.append(tr)})}catch(e){summary.textContent='status unavailable'}}refresh();setInterval(refresh,1000)</script>
 +    """.trimIndent()
 +}
+diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
+index 22a174cb..ca017b98 100644
+--- a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
++++ b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
+@@ -115,6 +115,10 @@ object TrafficRecorder {
+         scheduleUpdateLocked()
+     }
+ 
++    suspend fun snapshot(): List<TrafficRecord> = updateMutex.withLock {
++        buildList(records.size) { records.forEachValue { add(it.copy()) } }
++    }
++
+     suspend fun update() = updateMutex.withLock { updateLocked() }
+     private suspend fun updateLocked() {
+         if (updateJob === currentCoroutineContext()[Job]) updateJob = null else unscheduleUpdateLocked()
 diff --git a/mobile/src/main/rust/vpnhotspotd/src/dns.rs b/mobile/src/main/rust/vpnhotspotd/src/dns.rs
 index f91ef2ff..83e95302 100644
 --- a/mobile/src/main/rust/vpnhotspotd/src/dns.rs

@@ -1,0 +1,62 @@
+name: Build patched debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'patches/**'
+      - 'scripts/fork-release/**'
+      - '.github/workflows/build-patched-debug.yml'
+      - 'FORK.md'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: maintenance
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - name: Prepare patched source
+        working-directory: maintenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 scripts/fork-release/release.py prepare \
+            --maintenance "$GITHUB_WORKSPACE/maintenance" \
+            --source "$GITHUB_WORKSPACE/source" \
+            --output "$GITHUB_WORKSPACE/prepared"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "ndk;29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+      - name: Install Rust targets and cargo-ndk
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+          cargo install cargo-ndk --locked
+      - name: Build patched debug APK
+        working-directory: source
+        run: ./gradlew :mobile:assembleDebug --no-daemon
+      - name: Upload patched debug APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: patched-debug-apk
+          path: source/mobile/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
