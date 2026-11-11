@@ -1,0 +1,128 @@
+name: Signed test APK (master only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject untrusted dispatch refs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          set -eu
+          test "$EVENT_NAME" = workflow_dispatch
+          test "$REPOSITORY" = lovitus/vpnhostspot-with-web
+          test "$REF" = refs/heads/master
+
+  verify:
+    needs: gate
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.unsigned.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: maintenance
+          persist-credentials: false
+      - name: Test build and signing checks
+        run: python3 -m unittest discover -s maintenance/scripts/signed-test -p 'test_*.py' -v
+      - name: Resolve pinned trusted source and apply only web patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 maintenance/scripts/signed-test/signed_test.py prepare
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+      - uses: gradle/actions/setup-gradle@7ca78c16c887dc6c5f36fd6d0cb0f5c23d940e69 # v6
+      - name: Install build tools
+        run: |
+          set -eu
+          sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;29.0.14206865'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+          cargo install cargo-ndk --locked
+      - name: Initialize pinned source submodules
+        working-directory: source
+        run: git submodule update --init --recursive --depth 1
+      - name: Build unsigned release APKs
+        working-directory: source
+        run: |
+          set -eu
+          ./gradlew :mobile:verifyReleaseCoroutineDebugR8 :mobile:assembleRelease --no-daemon
+          git diff --exit-code
+      - name: Check APK package, version and all four ABIs
+        run: |
+          set -eu
+          mkdir -p verified/apks
+          cp source/mobile/build/outputs/apk/release/*.apk verified/apks/
+          python3 maintenance/scripts/signed-test/signed_test.py verify
+      # Separate runners keep build scripts and dependencies away from signing secrets.
+      # This internal transfer is deleted before signing; only the final artifact remains.
+      - name: Transfer verified unsigned APKs
+        id: unsigned
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: internal-verified-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: verified/
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    needs: [gate, verify]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'lovitus/vpnhostspot-with-web' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write # Delete the intermediate unsigned transfer, not releases or tags.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: maintenance
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          artifact-ids: ${{ needs.verify.outputs.artifact_id }}
+          path: verified
+      - name: Delete internal transfer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          ARTIFACT_ID: ${{ needs.verify.outputs.artifact_id }}
+        run: |
+          set -eu
+          case "$ARTIFACT_ID" in ''|*[!0-9]*) exit 1 ;; esac
+          gh api --method DELETE "repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID"
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+      - name: Install signing tools
+        run: sdkmanager 'build-tools;37.0.0'
+      - name: Sign and verify all four APKs with trusted p4 certificate
+        env:
+          APK_SIGNING_KEY: ${{ secrets.APK_SIGNING_KEY }}
+          APK_SIGNING_PASSWORD: ${{ secrets.APK_SIGNING_PASSWORD }}
+          APK_SIGNING_ALIAS: ${{ secrets.APK_SIGNING_ALIAS }}
+        run: python3 maintenance/scripts/signed-test/signed_test.py sign
+      - name: Upload signed test APKs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: signed-test-apks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: signed-test/
+          if-no-files-found: error
+          retention-days: 7
