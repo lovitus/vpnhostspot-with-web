@@ -69,14 +69,18 @@ class DashboardWiringTest(unittest.TestCase):
         self.assertIn("connectionScope.launch", self.web)
 
     def test_dashboard_sampler_does_not_poll_or_persist_on_request(self):
-        snapshot = self.web[self.web.index("dashboardSnapshot") :] if "dashboardSnapshot" in self.web else ""
-        self.assertNotIn("readTrafficCounters", snapshot)
+        status = self.web[self.web.index("private fun status("):self.web.index("private fun upstreamJson")]
+        self.assertNotIn("readTrafficCounters", status)
         self.assertNotIn("trafficRecordDao", self.web)
-        self.assertIn("Copy recorder state only", self.source_patch)
-        status = self.web[self.web.index("private "): ]
+        self.assertIn("DashboardSampler", self.web)
+        self.assertIn("session.cache.peek()", status)
+        self.assertNotIn(".read {", status)
+        self.assertNotIn(".sample(", status)
         self.assertIn("private fun status(", status,
                       "HTTP status must read published state without suspending behind a sampler")
         self.assertNotIn("TrafficRecorder.dashboardSnapshot()", self.web)
+        self.assertEqual(self.web.count("DaemonController.readTrafficCounters()"), 1)
+        self.assertIn("samplerJob.start()", self.web)
 
     def test_dashboard_reports_vpn_separately_and_expires_neighbours(self):
         self.assertIn("Upstreams.vpn.collect", self.web)
