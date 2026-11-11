@@ -4,6 +4,9 @@
 
 另有一个 Rust 1.99 Clippy 兼容补丁：ICMP 校验和按两个字节迭代的写法改用 `as_chunks::<2>()`。输入为固定 16 字节数组，校验和计算、路由行为及外部状态均不改变，因此不需要新增 routing.md 状态说明。维护分支的上游 master 已将相关函数拆到 `icmp_quote.rs`，稳定版补丁仍针对 v3.0.8 的 `icmp_wire.rs` 重放。
 
+另有一个只读 Web 状态页面补丁 `patches/0005-web-admin.patch`。它在已有 downstream routing session 启动后，使用 app 进程绑定实际 downstream IPv4 地址的 80 端口，提供 `/` 和 `/api/status`；页面显示客户端邻居、累计流量、实时速率、VPN/fallback 网络和接口。它不鉴权，但没有封禁、配置修改、root 命令或控制 API；`vpnhotspot.lan` 只在 daemon DNS 中精确返回默认 P2P 网关 `192.168.49.1`，其他查询仍走原有 resolver。非默认网关地址请优先使用页面显示的数字地址。
+
+
 `iptables-restore: line 10 failed` 本身不足以确认每一台设备的原因。若重启或本补丁的 Clean/reapply 后仍出错，需要应用版本、Android/ROM 版本、触发操作及“导出调试信息”里的 restore 输入。
 
 ## v3.0.8-p3：旧策略路由恢复

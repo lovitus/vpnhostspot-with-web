@@ -1,0 +1,244 @@
+diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
+new file mode 100644
+index 00000000..d869ab12
+--- /dev/null
++++ b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
+@@ -0,0 +1,132 @@
++package be.mygod.vpnhotspot
++
++import be.mygod.vpnhotspot.net.NetlinkNeighbour
++import be.mygod.vpnhotspot.net.monitor.TrafficRecorder
++import be.mygod.vpnhotspot.net.monitor.Upstream
++import be.mygod.vpnhotspot.net.monitor.Upstreams
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.isActive
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.flow.collect
++import java.net.Inet4Address
++import java.net.NetworkInterface
++import java.net.ServerSocket
++import java.net.Socket
++import java.net.SocketException
++import java.io.BufferedReader
++import java.io.BufferedWriter
++import java.io.InputStreamReader
++import java.io.OutputStreamWriter
++import java.util.concurrent.ConcurrentHashMap
++import kotlin.math.max
++
++/** Read-only local status page. It has no root, firewall, DNS, or routing authority. */
++object WebAdmin {
++    private const val PORT = 80
++    private const val MAX_LINE = 4096
++    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
++    private val servers = ConcurrentHashMap<String, Job>()
++    private val gatewayAddresses = ConcurrentHashMap<String, String>()
++    private val neighbours = ConcurrentHashMap<String, List<NetlinkNeighbour>>()
++    private val lastTraffic = ConcurrentHashMap<String, Map<String, TrafficTotals>>()
++    private val lastTrafficAt = ConcurrentHashMap<String, Long>()
++    private var neighbourJob: Job? = null
++    private data class TrafficTotals(val sent: Long, val received: Long)
++
++    fun addInterface(iface: String) {
++        if (servers.containsKey(iface)) return
++        if (neighbourJob == null) neighbourJob = scope.launch {
++            NetlinkNeighbour.snapshots.collect { snapshot ->
++                servers.keys.forEach { downstream -> neighbours[downstream] = snapshot.filter { it.dev == downstream } }
++            }
++        }
++        servers[iface] = scope.launch { serve(iface) }
++    }
++
++    fun removeInterface(iface: String) {
++        servers.remove(iface)?.cancel()
++        gatewayAddresses.remove(iface)
++        neighbours.remove(iface)
++        lastTraffic.remove(iface)
++        lastTrafficAt.remove(iface)
++        if (servers.isEmpty()) { neighbourJob?.cancel(); neighbourJob = null }
++    }
++
++    private suspend fun serve(iface: String) {
++        while (scope.isActive && servers.containsKey(iface)) {
++            val address = gatewayAddress(iface) ?: run { delay(500); continue }
++            try {
++                gatewayAddresses[iface] = address.hostAddress.orEmpty()
++                ServerSocket(PORT, 16, address).use { server ->
++                    while (scope.isActive && servers.containsKey(iface)) {
++                        val socket = server.accept()
++                        scope.launch { handle(socket, iface) }
++                    }
++                }
++            } catch (_: SocketException) { if (scope.isActive && servers.containsKey(iface)) delay(500) }
++            catch (_: SecurityException) { return }
++            catch (_: Exception) { if (scope.isActive && servers.containsKey(iface)) delay(500) }
++        }
++        servers.remove(iface); gatewayAddresses.remove(iface)
++    }
++
++    private fun gatewayAddress(iface: String): Inet4Address? = try {
++        NetworkInterface.getByName(iface)?.inetAddresses?.asSequence()?.filterIsInstance<Inet4Address>()?.firstOrNull()
++    } catch (_: SocketException) { null }
++
++    private suspend fun handle(socket: Socket, iface: String) {
++        socket.use { connection ->
++            connection.soTimeout = 3000
++            val reader = BufferedReader(InputStreamReader(connection.getInputStream(), Charsets.US_ASCII))
++            val request = reader.readLine()?.takeIf { it.length <= MAX_LINE } ?: return
++            val parts = request.split(' ', limit = 3)
++            if (parts.size < 2 || parts[0] != "GET") { reply(connection, 405, "text/plain; charset=utf-8", "method not allowed"); return }
++            while (true) { val line = reader.readLine() ?: return; if (line.isEmpty()) break; if (line.length > MAX_LINE) return }
++            when (parts[1].substringBefore('?')) {
++                "/", "/index.html" -> reply(connection, 200, "text/html; charset=utf-8", INDEX)
++                "/api/status" -> reply(connection, 200, "application/json; charset=utf-8", status(iface))
++                else -> reply(connection, 404, "text/plain; charset=utf-8", "not found")
++            }
++        }
++    }
++
++    private fun reply(socket: Socket, code: Int, type: String, body: String) {
++        val bytes = body.toByteArray(Charsets.UTF_8)
++        val output = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
++        output.write("HTTP/1.1 $code ${if (code == 200) "OK" else "Error"}\r\nContent-Type: $type\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: ${bytes.size}\r\n\r\n")
++        output.flush(); socket.getOutputStream().write(bytes); socket.getOutputStream().flush()
++    }
++
++    private suspend fun status(iface: String): String {
++        val records = try { TrafficRecorder.snapshot() } catch (_: Exception) { emptyList() }
++        val totals = HashMap<String, TrafficTotals>()
++        records.filter { it.downstream == iface }.forEach { record ->
++            val old = totals[record.mac.toString()] ?: TrafficTotals(0, 0)
++            totals[record.mac.toString()] = TrafficTotals(old.sent + record.sentBytes, old.received + record.receivedBytes)
++        }
++        val now = System.currentTimeMillis(); val old = lastTraffic.put(iface, totals) ?: emptyMap()
++        val elapsed = max(1L, now - (lastTrafficAt.put(iface, now) ?: now))
++        val clients = neighbours[iface].orEmpty().mapNotNull { n ->
++            val mac = n.validClientMac?.toString() ?: return@mapNotNull null
++            val current = totals[mac] ?: TrafficTotals(0, 0); val previous = old[mac] ?: current
++            val send = rate(current.sent - previous.sent, elapsed); val receive = rate(current.received - previous.received, elapsed)
++            "{\"mac\":${json(mac)},\"ip\":${json(n.ip.hostAddress.orEmpty())},\"sendBytesPerSecond\":$send,\"receiveBytesPerSecond\":$receive,\"sendBytes\":${current.sent},\"receiveBytes\":${current.received}}"
++        }
++        return "{\"schema\":1,\"downstream\":${json(iface)},\"gateway\":${json(gatewayAddresses[iface].orEmpty())},\"clientCount\":${clients.size},\"clients\":[${clients.joinToString(",")}],\"vpn\":${upstreamJson(Upstreams.primary.value)},\"fallback\":${upstreamJson(Upstreams.fallback.value)}}"
++    }
++
++    private fun rate(delta: Long, elapsed: Long) = delta.coerceAtLeast(0) * 1000 / elapsed
++    private fun upstreamJson(value: Upstream?) = value?.let { "{\"network\":${it.network.networkHandle},\"interfaces\":[${it.properties.linkAddresses.joinToString(",") { a -> json(a.address.hostAddress.orEmpty()) }}]}" } ?: "null"
++    private fun json(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
++
++    private val INDEX = """
++        <!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>VPNHotspot</title>
++        <style>body{font:16px system-ui;margin:24px;max-width:960px}table{border-collapse:collapse;width:100%}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:left}.muted{color:#777}</style>
++        <h1>VPNHotspot</h1><p id=summary class=muted>loading...</p><table><thead><tr><th>Client</th><th>IP</th><th>↓</th><th>↑</th><th>Total</th></tr></thead><tbody id=clients></tbody></table>
++        <script>async function refresh(){try{const s=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json());summary.textContent=`${s.gateway} · ${s.clientCount} clients · VPN ${s.vpn?'connected':'down'} · fallback ${s.fallback?'available':'down'}`;clients.textContent='';s.clients.forEach(c=>{const tr=document.createElement('tr');[c.mac,c.ip,`${c.receiveBytesPerSecond} B/s`,`${c.sendBytesPerSecond} B/s`,`${c.receiveBytes+c.sendBytes} B`].forEach(v=>{const td=document.createElement('td');td.textContent=v;tr.append(td)});clients.append(tr)})}catch(e){summary.textContent='status unavailable'}}refresh();setInterval(refresh,1000)</script>
++    """.trimIndent()
++}
+diff --git a/mobile/src/main/rust/vpnhotspotd/src/dns.rs b/mobile/src/main/rust/vpnhotspotd/src/dns.rs
+index f91ef2ff..83e95302 100644
+--- a/mobile/src/main/rust/vpnhotspotd/src/dns.rs
++++ b/mobile/src/main/rust/vpnhotspotd/src/dns.rs
+@@ -546,6 +546,13 @@ async fn resolve_query_accounted(
+ }
+ 
+ async fn resolve_or_error(config: &SessionConfig, query: &[u8]) -> Option<DnsResponse> {
++    if let Some(response) = dns_wire::local_admin_response(query, [192, 168, 49, 1]) {
++        return Some(DnsResponse {
++            bytes: response,
++            sent_to_resolver: false,
++            received_from_resolver: false,
++        });
++    }
+     let (result, sent_to_resolver) = resolve_query_accounted(config, query).await;
+     match result {
+         Ok(response) => Some(DnsResponse {
+diff --git a/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs b/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs
+index d13760b9..676e87ca 100644
+--- a/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs
++++ b/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs
+@@ -6,6 +6,54 @@ const FLAGS_OPCODE_MASK: u8 = 0x78;
+ const FLAGS_AD_CD_MASK: u8 = 0x30;
+ const RCODE_SERVFAIL: u8 = 2;
+ 
++pub fn local_admin_response(query: &[u8], address: [u8; 4]) -> Option<Vec<u8>> {
++    if query.len() < HEADER_LEN
++        || query[2] & FLAG_RESPONSE != 0
++        || u16::from_be_bytes([query[4], query[5]]) != 1
++    {
++        return None;
++    }
++    let name_start = HEADER_LEN;
++    let name_end = name_end(query, name_start)?;
++    let qtype = u16::from_be_bytes([*query.get(name_end)?, *query.get(name_end + 1)?]);
++    let qclass = u16::from_be_bytes([*query.get(name_end + 2)?, *query.get(name_end + 3)?]);
++    if qtype != 1 || qclass != 1 || !same_name(query, name_start, name_end, b"vpnhotspot.lan") {
++        return None;
++    }
++    let question_end = name_end + 4;
++    let mut response = Vec::with_capacity(question_end + 16);
++    response.extend_from_slice(&query[..2]);
++    response
++        .push(FLAG_RESPONSE | (query[2] & FLAGS_OPCODE_MASK) | (query[2] & FLAG_RECURSION_DESIRED));
++    response.push(FLAG_RECURSION_AVAILABLE | (query[3] & FLAGS_AD_CD_MASK));
++    response.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0]);
++    response.extend_from_slice(&query[HEADER_LEN..question_end]);
++    response.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4]);
++    response.extend_from_slice(&address);
++    Some(response)
++}
++
++fn same_name(packet: &[u8], start: usize, end: usize, expected: &[u8]) -> bool {
++    let mut offset = start;
++    let mut plain = Vec::new();
++    while offset < end {
++        let length = packet[offset] as usize;
++        if length == 0 || offset + 1 + length > end {
++            return false;
++        }
++        if !plain.is_empty() {
++            plain.push(b'.');
++        }
++        plain.extend(
++            packet[offset + 1..offset + 1 + length]
++                .iter()
++                .map(|byte| byte.to_ascii_lowercase()),
++        );
++        offset += 1 + length;
++    }
++    plain == expected
++}
++
+ pub fn servfail_response(query: &[u8]) -> Option<Vec<u8>> {
+     if query.len() < HEADER_LEN || query[2] & FLAG_RESPONSE != 0 {
+         return None;
+@@ -105,4 +153,28 @@ mod tests {
+         assert!(servfail_response(&[0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_none());
+         assert!(servfail_response(&[0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 3, b'w']).is_none());
+     }
++
++    #[test]
++    fn local_admin_name_returns_fixed_gateway_address() {
++        let query = [
++            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 9, b'v', b'p',
++            b'n', b'h', b'o', b't', b's', b'p', b'o', 3, b'l', b'a', b'n', 0, 0, 1, 0, 1,
++        ];
++        let response = super::local_admin_response(&query, [192, 168, 49, 1]).unwrap();
++        assert_eq!(&response[response.len() - 4..], &[192, 168, 49, 1]);
++        assert!(
++            super::local_admin_response(&query[..query.len() - 1], [192, 168, 49, 1]).is_none()
++        );
++    }
++
++    #[test]
++    fn local_admin_name_does_not_intercept_other_names() {
++        let mut query = vec![
++            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 3, b'w', b'w',
++            b'w', 3, b'l', b'a', b'n', 0, 0, 1, 0, 1,
++        ];
++        assert!(super::local_admin_response(&query, [192, 168, 49, 1]).is_none());
++        query[13] = b'V';
++        assert!(super::local_admin_response(&query, [192, 168, 49, 1]).is_none());
++    }
+ }
