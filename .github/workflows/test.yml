@@ -2,6 +2,8 @@ name: Test
 
 on:
   push:
+    branches-ignore: [agent/web-dashboard]
+    tags: ['**']
   pull_request:
   workflow_dispatch:
 

@@ -1,0 +1,71 @@
+name: Dashboard patched source
+
+on:
+  push:
+    branches: [agent/web-dashboard]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dashboard-patched-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/agent/web-dashboard'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Replay dashboard patch on exact p4 source
+        run: |
+          git fetch https://github.com/lovitus/VPNHotspot.git ae6f39ed82153b5edf6c797bc1a27e17ab5ee845
+          git worktree add --detach patched ae6f39ed82153b5edf6c797bc1a27e17ab5ee845
+          git -C patched apply --check "$GITHUB_WORKSPACE/patches/0005-web-admin.patch"
+          git -C patched apply "$GITHUB_WORKSPACE/patches/0005-web-admin.patch"
+          git -C patched submodule update --init --recursive
+          sha256sum patches/0005-web-admin.patch
+          git -C patched diff --stat
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v4
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Install SDK packages on hosted runner
+        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "ndk;29.0.14206865"
+      - name: Compile and run Android JVM unit tests on patched source
+        working-directory: patched
+        run: ./gradlew :mobile:compileDebugKotlin :mobile:testDebugUnitTest --no-daemon --console=plain
+      - name: Execute production Kotlin behavior tests
+        run: python3 tests/run_dashboard_behavior.py "$GITHUB_WORKSPACE/patched"
+      - name: Check Android lifecycle wiring
+        env:
+          VPNHOTSPOT_SOURCE: ${{ github.workspace }}/patched
+        run: python3 -m unittest discover -s tests -p 'test_web_dashboard_lifecycle.py' -v
+      - name: Check Rust formatting and Android compilation
+        working-directory: patched/mobile/src/main/rust/vpnhotspotd
+        run: |
+          rustup target add aarch64-linux-android
+          cargo fmt -- --check
+          cargo check --locked --target aarch64-linux-android
+          cargo clippy --locked --target aarch64-linux-android --all-targets -- -D warnings
+      - name: Execute DNS wire behavior tests
+        run: |
+          rustc --test patched/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs -o "$RUNNER_TEMP/dashboard-dns-tests"
+          "$RUNNER_TEMP/dashboard-dns-tests"
+      - name: Preserve reports and exact patch
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dashboard-validation
+          path: |
+            patches/0005-web-admin.patch
+            patched/mobile/build/reports/tests/
+            patched/mobile/build/test-results/
+          if-no-files-found: warn
