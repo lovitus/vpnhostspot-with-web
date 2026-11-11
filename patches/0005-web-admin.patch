@@ -155,10 +155,10 @@ index f91ef2ff..83e95302 100644
      match result {
          Ok(response) => Some(DnsResponse {
 diff --git a/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs b/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs
-index d13760b9..676e87ca 100644
+index d13760b9..405fd7af 100644
 --- a/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs
 +++ b/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs
-@@ -6,6 +6,54 @@ const FLAGS_OPCODE_MASK: u8 = 0x78;
+@@ -6,6 +6,57 @@ const FLAGS_OPCODE_MASK: u8 = 0x78;
  const FLAGS_AD_CD_MASK: u8 = 0x30;
  const RCODE_SERVFAIL: u8 = 2;
  
@@ -194,7 +194,10 @@ index d13760b9..676e87ca 100644
 +    let mut plain = Vec::new();
 +    while offset < end {
 +        let length = packet[offset] as usize;
-+        if length == 0 || offset + 1 + length > end {
++        if length == 0 {
++            return offset + 1 == end && plain == expected;
++        }
++        if offset + 1 + length > end {
 +            return false;
 +        }
 +        if !plain.is_empty() {
@@ -213,7 +216,7 @@ index d13760b9..676e87ca 100644
  pub fn servfail_response(query: &[u8]) -> Option<Vec<u8>> {
      if query.len() < HEADER_LEN || query[2] & FLAG_RESPONSE != 0 {
          return None;
-@@ -105,4 +153,28 @@ mod tests {
+@@ -105,4 +156,28 @@ mod tests {
          assert!(servfail_response(&[0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_none());
          assert!(servfail_response(&[0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 3, b'w']).is_none());
      }
@@ -221,8 +224,8 @@ index d13760b9..676e87ca 100644
 +    #[test]
 +    fn local_admin_name_returns_fixed_gateway_address() {
 +        let query = [
-+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 9, b'v', b'p',
-+            b'n', b'h', b'o', b't', b's', b'p', b'o', 3, b'l', b'a', b'n', 0, 0, 1, 0, 1,
++            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 10, b'v', b'p',
++            b'n', b'h', b'o', b't', b's', b'p', b'o', b't', 3, b'l', b'a', b'n', 0, 0, 1, 0, 1,
 +        ];
 +        let response = super::local_admin_response(&query, [192, 168, 49, 1]).unwrap();
 +        assert_eq!(&response[response.len() - 4..], &[192, 168, 49, 1]);
