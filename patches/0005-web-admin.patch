@@ -1,5 +1,5 @@
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/RoutingManager.kt b/mobile/src/main/java/be/mygod/vpnhotspot/RoutingManager.kt
-index ec1ab859..60b3ec08 100644
+index ec1ab8599c737645404ba7dedc4822ec09baa82d..60b3ec083f2873d65b1d80ce9356e87903df4880 100644
 --- a/mobile/src/main/java/be/mygod/vpnhotspot/RoutingManager.kt
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/RoutingManager.kt
 @@ -179,6 +179,7 @@ abstract class RoutingManager(private val caller: Any, val downstream: String, p
@@ -18,12 +18,27 @@ index ec1ab859..60b3ec08 100644
          try {
              routing.revert()
          } finally {
+diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
+index 22a174cb4c87568575693062bfd0784fc9b08a8d..ca017b983cc5cbb4eb556368db3ab6021cc626cc 100644
+--- a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
++++ b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
+@@ -115,6 +115,10 @@ object TrafficRecorder {
+         scheduleUpdateLocked()
+     }
+ 
++    suspend fun snapshot(): List<TrafficRecord> = updateMutex.withLock {
++        buildList(records.size) { records.forEachValue { add(it.copy()) } }
++    }
++
+     suspend fun update() = updateMutex.withLock { updateLocked() }
+     private suspend fun updateLocked() {
+         if (updateJob === currentCoroutineContext()[Job]) updateJob = null else unscheduleUpdateLocked()
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
 new file mode 100644
-index 00000000..aa61658f
+index 00000000..41fca2ed
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,282 @@
 +package be.mygod.vpnhotspot
 +
 +import be.mygod.vpnhotspot.net.NetlinkNeighbour
@@ -31,16 +46,21 @@ index 00000000..aa61658f
 +import be.mygod.vpnhotspot.net.monitor.Upstream
 +import be.mygod.vpnhotspot.net.monitor.Upstreams
 +import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.CoroutineStart
 +import kotlinx.coroutines.Dispatchers
 +import kotlinx.coroutines.Job
 +import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.currentCoroutineContext
 +import kotlinx.coroutines.delay
 +import kotlinx.coroutines.flow.collect
 +import kotlinx.coroutines.isActive
 +import kotlinx.coroutines.launch
-+import java.io.BufferedReader
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
++import java.io.ByteArrayOutputStream
 +import java.io.BufferedWriter
-+import java.io.InputStreamReader
++import java.io.IOException
++import java.io.InputStream
 +import java.io.OutputStreamWriter
 +import java.net.Inet4Address
 +import java.net.NetworkInterface
@@ -57,7 +77,12 @@ index 00000000..aa61658f
 +    private const val MAX_LINE = 4096
 +    private const val MAX_HEADERS = 64
 +    private const val MAX_CLIENTS = 16
++    private const val REQUEST_DEADLINE_MS = 3000L
++    private const val SNAPSHOT_MIN_INTERVAL_MS = 250L
 +    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
++    private val lifecycleLock = Any()
++    private var nextGeneration = 0L
++    private val generations = ConcurrentHashMap<String, Long>()
 +    private val jobs = ConcurrentHashMap<String, Job>()
 +    private val listeners = ConcurrentHashMap<String, ServerSocket>()
 +    private val clients = ConcurrentHashMap<String, AtomicInteger>()
@@ -65,18 +90,23 @@ index 00000000..aa61658f
 +    private val neighbours = ConcurrentHashMap<String, List<NetlinkNeighbour>>()
 +    private val lastTraffic = ConcurrentHashMap<String, Map<String, TrafficTotals>>()
 +    private val lastTrafficAt = ConcurrentHashMap<String, Long>()
++    private val snapshotMutex = Mutex()
++    private var snapshotAt = 0L
++    private var trafficSnapshot: Map<String, Map<String, TrafficTotals>> = emptyMap()
 +    private var neighbourJob: Job? = null
 +    private data class TrafficTotals(val sent: Long, val received: Long)
 +
 +    fun start(iface: String) = synchronized(lifecycleLock) {
 +        if (jobs[iface]?.isActive == true) return@synchronized
 +        jobs.remove(iface)
-+        val generation = nextGeneration.incrementAndGet()
++        val generation = ++nextGeneration
 +        generations[iface] = generation
 +        clients[iface] = AtomicInteger()
 +        if (neighbourJob == null) neighbourJob = scope.launch {
 +            NetlinkNeighbour.snapshots.collect { snapshot ->
-+                jobs.keys.forEach { downstream -> neighbours[downstream] = snapshot.filter { it.dev == downstream } }
++                jobs.keys.forEach { downstream ->
++                    neighbours[downstream] = snapshot.filter { it.dev == downstream }
++                }
 +            }
 +        }
 +        val job = scope.launch(start = CoroutineStart.LAZY) { serve(iface, generation) }
@@ -93,7 +123,10 @@ index 00000000..aa61658f
 +        neighbours.remove(iface)
 +        lastTraffic.remove(iface)
 +        lastTrafficAt.remove(iface)
-+        if (jobs.isEmpty()) { neighbourJob?.cancel(); neighbourJob = null }
++        if (jobs.isEmpty()) {
++            neighbourJob?.cancel()
++            neighbourJob = null
++        }
 +    }
 +
 +    private fun isCurrent(iface: String, generation: Long, job: Job) =
@@ -103,7 +136,10 @@ index 00000000..aa61658f
 +        val current = currentCoroutineContext()[Job] ?: return
 +        try {
 +            while (scope.isActive && isCurrent(iface, generation, current)) {
-+                val address = gatewayAddress(iface) ?: run { delay(500); continue }
++                val address = gatewayAddress(iface) ?: run {
++                    delay(500)
++                    continue
++                }
 +                var server: ServerSocket? = null
 +                try {
 +                    ServerSocket(PORT, 16, address).use { candidate ->
@@ -114,11 +150,16 @@ index 00000000..aa61658f
 +                        while (scope.isActive && isCurrent(iface, generation, current)) {
 +                            val socket = candidate.accept()
 +                            val count = clients[iface] ?: AtomicInteger(MAX_CLIENTS)
-+                            if (count.incrementAndGet() > MAX_CLIENTS) { count.decrementAndGet(); socket.close() }
-+                            else scope.launch {
-+                                try { handle(socket, iface) }
-+                                catch (_: IOException) { }
-+                                finally { count.decrementAndGet() }
++                            if (count.incrementAndGet() > MAX_CLIENTS) {
++                                count.decrementAndGet()
++                                socket.close()
++                            } else scope.launch {
++                                try {
++                                    handle(socket, iface)
++                                } catch (_: IOException) {
++                                } finally {
++                                    count.decrementAndGet()
++                                }
 +                            }
 +                        }
 +                    }
@@ -126,67 +167,61 @@ index 00000000..aa61658f
 +                    if (scope.isActive && isCurrent(iface, generation, current)) delay(250)
 +                } catch (_: IOException) {
 +                    if (scope.isActive && isCurrent(iface, generation, current)) delay(250)
-+                } catch (_: SecurityException) { return }
-+                finally { server?.let { listeners.remove(iface, it); it.close() } }
++                } catch (_: SecurityException) {
++                    return
++                } finally {
++                    server?.let { listeners.remove(iface, it); it.close() }
++                }
 +            }
 +        } finally {
 +            listeners[iface]?.let { listeners.remove(iface, it); it.close() }
 +            jobs.remove(iface, current)
-+            if (generations[iface] == generation) { generations.remove(iface, generation); gatewayAddresses.remove(iface) }
++            if (generations[iface] == generation) {
++                generations.remove(iface, generation)
++                gatewayAddresses.remove(iface)
++            }
 +        }
 +    }
 +
-+    private class RequestReader(private val input: InputStream, private val socket: Socket, private val deadlineNanos: Long) {
++    private class RequestReader(
++        private val input: InputStream,
++        private val socket: Socket,
++        private val deadlineNanos: Long,
++    ) {
 +        fun readLine(maxLength: Int): String? {
 +            val bytes = ByteArrayOutputStream()
 +            while (true) {
 +                val remaining = deadlineNanos - System.nanoTime()
 +                if (remaining <= 0) return null
-+                socket.soTimeout = max(1, (remaining / 1_000_000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
++                socket.soTimeout = max(
++                    1,
++                    (remaining / 1_000_000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
++                )
 +                val value = input.read()
-+                if (value < 0) return if (bytes.size() == 0) null else bytes.toString(Charsets.US_ASCII.name())
-+                if (value == '\\n'.code) return bytes.toString(Charsets.US_ASCII.name()).removeSuffix("\\r")
++                if (value < 0) return if (bytes.size() == 0) null else ascii(bytes)
++                if (value == '\n'.code) return ascii(bytes).removeSuffix("\r")
 +                if (bytes.size() >= maxLength) return null
 +                bytes.write(value)
 +            }
 +        }
++
++        private fun ascii(bytes: ByteArrayOutputStream) =
++            bytes.toString(Charsets.US_ASCII.name())
 +    }
 +
 +    private suspend fun handle(socket: Socket, iface: String) {
 +        socket.use { connection ->
-+            val reader = RequestReader(connection, connection, System.nanoTime() + REQUEST_DEADLINE_MS * 1_000_000L)
++            val reader = RequestReader(
++                connection.getInputStream(),
++                connection,
++                System.nanoTime() + REQUEST_DEADLINE_MS * 1_000_000L,
++            )
 +            val request = reader.readLine(MAX_LINE) ?: return
 +            val parts = request.split(' ', limit = 3)
 +            var headers = 0
 +            while (true) {
 +                val line = reader.readLine(MAX_LINE) ?: return
 +                if (++headers > MAX_HEADERS) return
-+                if (line.isEmpty()) break
-+            }
-+            if (parts.size < 2 || parts[0] != "GET") { reply(connection, 405, "text/plain; charset=utf-8", "method not allowed"); return }
-+            when (parts[1].substringBefore('?')) {
-+                "/", "/index.html" -> reply(connection, 200, "text/html; charset=utf-8", INDEX)
-+                "/api/status" -> reply(connection, 200, "application/json; charset=utf-8", status(iface))
-+                else -> reply(connection, 404, "text/plain; charset=utf-8", "not found")
-+            }
-+        }
-+    }
-+
-+    private fun gatewayAddress(iface: String): Inet4Address? = try {
-+        NetworkInterface.getByName(iface)?.inetAddresses?.asSequence()
-+            ?.filterIsInstance<Inet4Address>()?.firstOrNull()
-+    } catch (_: SocketException) { null }
-+
-+    private suspend fun handle(socket: Socket, iface: String) {
-+        socket.use { connection ->
-+            connection.soTimeout = 3000
-+            val reader = BufferedReader(InputStreamReader(connection.getInputStream(), Charsets.US_ASCII))
-+            val request = reader.readLine()?.takeIf { it.length <= MAX_LINE } ?: return
-+            val parts = request.split(' ', limit = 3)
-+            var headers = 0
-+            while (true) {
-+                val line = reader.readLine() ?: return
-+                if (line.length > MAX_LINE || ++headers > MAX_HEADERS) return
 +                if (line.isEmpty()) break
 +            }
 +            if (parts.size < 2 || parts[0] != "GET") {
@@ -201,10 +236,29 @@ index 00000000..aa61658f
 +        }
 +    }
 +
++    private fun gatewayAddress(iface: String): Inet4Address? = try {
++        NetworkInterface.getByName(iface)?.inetAddresses?.asSequence()
++            ?.filterIsInstance<Inet4Address>()?.firstOrNull()
++    } catch (_: SocketException) {
++        null
++    }
++
 +    private fun reply(socket: Socket, code: Int, type: String, body: String) {
 +        val bytes = body.toByteArray(Charsets.UTF_8)
 +        val output = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
-+        output.write("HTTP/1.1 $code ${if (code == 200) "OK" else if (code == 404) "Not Found" else "Method Not Allowed"}\r\nContent-Type: $type\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\r\nConnection: close\r\nContent-Length: ${bytes.size}\r\n\r\n")
++        val reason = when (code) {
++            200 -> "OK"
++            404 -> "Not Found"
++            else -> "Method Not Allowed"
++        }
++        output.write(
++            "HTTP/1.1 $code $reason\r\n" +
++                "Content-Type: $type\r\n" +
++                "Cache-Control: no-store\r\n" +
++                "Content-Security-Policy: default-src 'none'; connect-src 'self'; " +
++                "script-src 'unsafe-inline'; style-src 'unsafe-inline'\r\n" +
++                "Connection: close\r\nContent-Length: ${bytes.size}\r\n\r\n",
++        )
 +        output.flush()
 +        socket.getOutputStream().write(bytes)
 +        socket.getOutputStream().flush()
@@ -214,12 +268,18 @@ index 00000000..aa61658f
 +        val now = System.currentTimeMillis()
 +        if (now - snapshotAt >= SNAPSHOT_MIN_INTERVAL_MS) {
 +            val refreshed = HashMap<String, MutableMap<String, TrafficTotals>>()
-+            try { TrafficRecorder.update() } catch (_: Exception) { }
-+            try { TrafficRecorder.snapshot().forEach { record ->
-+                val totals = refreshed.getOrPut(record.downstream) { HashMap() }
-+                val old = totals[record.mac.toString()] ?: TrafficTotals(0, 0)
-+                totals[record.mac.toString()] = TrafficTotals(old.sent + record.sentBytes, old.received + record.receivedBytes)
-+            } } catch (_: Exception) { }
++            try {
++                TrafficRecorder.update()
++                TrafficRecorder.snapshot().forEach { record ->
++                    val totals = refreshed.getOrPut(record.downstream) { HashMap() }
++                    val old = totals[record.mac.toString()] ?: TrafficTotals(0, 0)
++                    totals[record.mac.toString()] = TrafficTotals(
++                        old.sent + record.sentBytes,
++                        old.received + record.receivedBytes,
++                    )
++                }
++            } catch (_: Exception) {
++            }
 +            trafficSnapshot = refreshed.mapValues { it.value.toMap() }
 +            snapshotAt = now
 +        }
@@ -230,14 +290,29 @@ index 00000000..aa61658f
 +            val mac = neighbour.validClientMac?.toString() ?: return@mapNotNull null
 +            val current = totals[mac] ?: TrafficTotals(0, 0)
 +            val previous = old[mac] ?: current
-+            "{\\"mac\\":${json(mac)},\\"ip\\":${json(neighbour.ip.hostAddress.orEmpty())},\\"sendBytesPerSecond\\":${rate(current.sent - previous.sent, elapsed)},\\"receiveBytesPerSecond\\":${rate(current.received - previous.received, elapsed)},\\"sendBytes\\":${current.sent},\\"receiveBytes\\":${current.received}}"
++            "{\"mac\":${json(mac)},\"ip\":${json(neighbour.ip.hostAddress.orEmpty())}," +
++                "\"sendBytesPerSecond\":${rate(current.sent - previous.sent, elapsed)}," +
++                "\"receiveBytesPerSecond\":${rate(current.received - previous.received, elapsed)}," +
++                "\"sendBytes\":${current.sent},\"receiveBytes\":${current.received}}"
 +        }
-+        "{\\"schema\\":1,\\"downstream\\":${json(iface)},\\"gateway\\":${json(gatewayAddresses[iface].orEmpty())},\\"clientCount\\":${clientJson.size},\\"clients\\":[${clientJson.joinToString(",")}],\\"vpn\\":${upstreamJson(Upstreams.primary.value)},\\"fallback\\":${upstreamJson(Upstreams.fallback.value)}}"
++        "{\"schema\":1,\"downstream\":${json(iface)}," +
++            "\"gateway\":${json(gatewayAddresses[iface].orEmpty())}," +
++            "\"clientCount\":${clientJson.size},\"clients\":[${clientJson.joinToString(",")}" +
++            "],\"vpn\":${upstreamJson(Upstreams.primary.value)}," +
++            "\"fallback\":${upstreamJson(Upstreams.fallback.value)}}"
 +    }
 +
 +    private fun rate(delta: Long, elapsed: Long) = delta.coerceAtLeast(0) * 1000 / elapsed
-+    private fun upstreamJson(value: Upstream?) = value?.let { "{\"network\":${it.network.networkHandle},\"interfaces\":[${it.properties.linkAddresses.joinToString(",") { address -> json(address.address.hostAddress.orEmpty()) }}]}" } ?: "null"
-+    private fun json(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
++
++    private fun upstreamJson(value: Upstream?) = value?.let {
++        "{\"network\":${it.network.networkHandle},\"interfaces\":[" +
++            it.properties.linkAddresses.joinToString(",") { address ->
++                json(address.address.hostAddress.orEmpty())
++            } + "]}"
++    } ?: "null"
++
++    private fun json(value: String) =
++        "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 +
 +    private val INDEX = """
 +        <!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>VPNHotspot</title>
@@ -246,18 +321,3 @@ index 00000000..aa61658f
 +        <script>async function refresh(){try{const s=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json());summary.textContent=s.gateway+' · '+s.clientCount+' clients · VPN '+(s.vpn?'connected':'down')+' · fallback '+(s.fallback?'available':'down');clients.textContent='';s.clients.forEach(c=>{const tr=document.createElement('tr');[c.mac,c.ip,c.receiveBytesPerSecond+' B/s',c.sendBytesPerSecond+' B/s',(c.receiveBytes+c.sendBytes)+' B'].forEach(v=>{const td=document.createElement('td');td.textContent=v;tr.append(td)});clients.append(tr)})}catch(e){summary.textContent='status unavailable'}}refresh();setInterval(refresh,1000)</script>
 +    """.trimIndent()
 +}
-diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
-index 22a174cb..ca017b98 100644
---- a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
-+++ b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
-@@ -115,6 +115,10 @@ object TrafficRecorder {
-         scheduleUpdateLocked()
-     }
- 
-+    suspend fun snapshot(): List<TrafficRecord> = updateMutex.withLock {
-+        buildList(records.size) { records.forEachValue { add(it.copy()) } }
-+    }
-+
-     suspend fun update() = updateMutex.withLock { updateLocked() }
-     private suspend fun updateLocked() {
-         if (updateJob === currentCoroutineContext()[Job]) updateJob = null else unscheduleUpdateLocked()
