@@ -29,7 +29,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..1270b4e196f44dbd69ff9447af2ce4de61b69823
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,151 @@
 +package be.mygod.vpnhotspot
 +
 +import java.io.ByteArrayOutputStream
@@ -145,15 +145,23 @@ index 0000000000000000000000000000000000000000..1270b4e196f44dbd69ff9447af2ce4de
 +    data class Totals(val sent: Long, val received: Long)
 +    data class Sample(val totals: Map<String, Totals>, val rates: Map<String, Totals>, val available: Boolean)
 +    private val previous = HashMap<String, Counter>()
++    private val retired = HashSet<String>()
 +    private val totals = HashMap<String, Totals>()
 +    private var sampledAt: Long? = null
 +    fun sample(counters: List<Counter>, now: Long, available: Boolean): Sample {
 +        if (!available) return Sample(totals.toMap(), emptyMap(), false)
++        val currentSources = counters.mapTo(HashSet()) { it.source }
++        retired.addAll(previous.keys - currentSources)
++        previous.keys.retainAll(currentSources)
 +        val delta = HashMap<String, Totals>()
++        val unavailable = HashSet<String>()
 +        counters.forEach { current ->
 +            val old = previous.put(current.source, current)
-+            val sent = if (old == null || current.sent < old.sent) current.sent else current.sent - old.sent
-+            val received = if (old == null || current.received < old.received) current.received else current.received - old.received
++            val wasRetired = retired.remove(current.source)
++            val reset = old != null && (current.sent < old.sent || current.received < old.received)
++            val sent = if (old == null || wasRetired || reset) 0 else current.sent - old.sent
++            val received = if (old == null || wasRetired || reset) 0 else current.received - old.received
++            if (wasRetired || reset) unavailable.add(current.mac)
 +            val before = totals[current.mac] ?: Totals(0, 0)
 +            totals[current.mac] = Totals(before.sent + sent, before.received + received)
 +            val change = delta[current.mac] ?: Totals(0, 0)
@@ -165,7 +173,7 @@ index 0000000000000000000000000000000000000000..1270b4e196f44dbd69ff9447af2ce4de
 +            totals.mapValues { (mac, _) ->
 +                val change = delta[mac] ?: Totals(0, 0)
 +                Totals(change.sent * 1000 / elapsed, change.received * 1000 / elapsed)
-+            }, true)
++            }.filterKeys { it !in unavailable }, true)
 +    }
 +}
 +
@@ -206,7 +214,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad8587c253f7
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,214 @@
 +package be.mygod.vpnhotspot
 +
 +import be.mygod.vpnhotspot.net.NetlinkNeighbour
@@ -240,7 +248,7 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 +    private val lifecycleLock = Any()
 +    private val sessions = HashMap<String, Session>()
-+    private data class RecorderSnapshot(val records: List<TrafficRecord>?, val at: Long, val wallTime: Long)
++    private data class RecorderSnapshot(val records: List<TrafficRecord>, val at: Long, val wallTime: Long)
 +    private val recorderCache = DashboardCache<RecorderSnapshot>()
 +    private class Session {
 +        val createdAt = System.nanoTime() / 1_000_000
@@ -249,7 +257,9 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +        val traffic = DashboardTraffic()
 +        lateinit var job: Job
 +        @Volatile var gateway = ""
++        @Volatile var vpn: Upstream? = null
 +        @Volatile var neighbours: List<NetlinkNeighbour>? = null
++        @Volatile var neighboursAt = 0L
 +    }
 +
 +    fun start(iface: String) = synchronized(lifecycleLock) {
@@ -270,9 +280,13 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +
 +    private suspend fun serve(iface: String, session: Session) {
 +        val connectionScope = CoroutineScope(currentCoroutineContext())
++        val vpnJob = connectionScope.launch {
++            Upstreams.vpn.collect { session.vpn = it }
++        }
 +        val neighbourJob = connectionScope.launch {
 +            NetlinkNeighbour.snapshots.collect { snapshot ->
 +                session.neighbours = snapshot.filter { it.dev == iface }
++                session.neighboursAt = System.nanoTime() / 1_000_000
 +            }
 +        }
 +        try {
@@ -315,6 +329,7 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +            }
 +        } finally {
 +            session.resources.stop()
++            vpnJob.cancel()
 +            neighbourJob.cancel()
 +            synchronized(lifecycleLock) {
 +                // Identity matters: a late finally never touches a replacement generation.
@@ -366,7 +381,10 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +                record.sentBytes, record.receivedBytes,
 +            )
 +        }, snapshot.at, records != null)
-+        val observed = session.neighbours
++        val observed = session.neighbours.takeIf {
++            val at = session.neighboursAt
++            at != 0L && System.nanoTime() / 1_000_000 - at <= 3000
++        }
 +        val clients = dashboardClients(observed.orEmpty().map {
 +            it.validClientMac?.toString() to it.ip.hostAddress.orEmpty()
 +        }).map { (mac, ips) ->
@@ -380,7 +398,8 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +        "{\"schema\":2,\"downstream\":${json(iface)},\"gateway\":${json(session.gateway)}," +
 +            "\"sampledAt\":${snapshot.wallTime},\"trafficAvailable\":${sample.available}," +
 +            "\"neighboursAvailable\":${observed != null},\"observedClientCount\":${clients.size}," +
-+            "\"clients\":[${clients.joinToString(",")}],\"primary\":${upstreamJson(Upstreams.primary.value)}," +
++            "\"clients\":[${clients.joinToString()}],\"vpn\":${upstreamJson(session.vpn)}," +
++            "\"primary\":${upstreamJson(Upstreams.primary.value)}," +
 +            "\"fallback\":${upstreamJson(Upstreams.fallback.value)}}"
 +    }
 +
@@ -407,71 +426,54 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +        <h1>VPNHotspot</h1><p id=summary class=muted>loading...</p>
 +        <p class=muted>Observed neighbours are not a Wi-Fi association count. Primary/fallback availability does not prove per-client routing. Totals include recorded sources for this dashboard session; unavailable values show —.</p>
 +        <table><thead><tr><th>Observed client</th><th>IP addresses</th><th>↓ B/s</th><th>↑ B/s</th><th>Recorded session bytes</th></tr></thead><tbody id=clients></tbody></table>
-+        <script>const fmt=v=>v===null?'—':v;async function refresh(){try{const s=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json());summary.textContent=s.gateway+' · '+s.observedClientCount+' observed clients · primary '+(s.primary?'available':'unavailable')+' · fallback '+(s.fallback?'available':'unavailable')+(s.trafficAvailable?'':' · traffic unavailable (prior totals retained)')+(s.neighboursAvailable?'':' · neighbours unavailable');clients.textContent='';s.clients.forEach(c=>{const tr=document.createElement('tr');[c.mac,c.ips.join(', '),fmt(c.receiveBytesPerSecond),fmt(c.sendBytesPerSecond),c.receiveBytes===null||c.sendBytes===null?'—':c.receiveBytes+c.sendBytes].forEach(v=>{const td=document.createElement('td');td.textContent=v;tr.append(td)});clients.append(tr)})}catch(e){summary.textContent='status unavailable'}}refresh();setInterval(refresh,1000)</script>
++        <script>const fmt=v=>v===null?'—':v;async function refresh(){try{const s=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json());summary.textContent=s.gateway+' · '+s.observedClientCount+' observed clients · VPN '+(s.vpn?'connected':'unavailable')+' · primary '+(s.primary?'available':'unavailable')+' · fallback '+(s.fallback?'available':'unavailable')+(s.trafficAvailable?'':' · traffic unavailable (prior totals retained)')+(s.neighboursAvailable?'':' · neighbours unavailable');clients.textContent='';s.clients.forEach(c=>{const tr=document.createElement('tr');[c.mac,c.ips.join(', '),fmt(c.receiveBytesPerSecond),fmt(c.sendBytesPerSecond),c.receiveBytes===null||c.sendBytes===null?'—':c.receiveBytes+c.sendBytes].forEach(v=>{const td=document.createElement('td');td.textContent=v;tr.append(td)});clients.append(tr)})}catch(e){summary.textContent='status unavailable'}}refresh();setInterval(refresh,1000)</script>
 +    """.trimIndent()
 +}
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
 index 22a174cb4c87568575693062bfd0784fc9b08a8d..aa0e8a4810156618f5114bcaed88309af6e2996f 100644
 --- a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
-@@ -115,12 +115,22 @@ object TrafficRecorder {
+@@ -115,12 +115,17 @@ object TrafficRecorder {
          scheduleUpdateLocked()
      }
  
-+    /** A failed/partial daemon read must not become a plausible zero on the dashboard. */
-+    suspend fun dashboardSnapshot(): List<TrafficRecord>? = updateMutex.withLock {
-+        if (!updateLocked()) null else buildList(records.size) { records.forEachValue { add(it.copy()) } }
++    /** Copy recorder state only; daemon polling and persistence stay in the recorder sampler. */
++    suspend fun dashboardSnapshot(): List<TrafficRecord> = updateMutex.withLock {
++        buildList(records.size) { records.forEachValue { add(it.copy()) } }
 +    }
 +
      suspend fun update() = updateMutex.withLock { updateLocked() }
 -    private suspend fun updateLocked() {
-+    private suspend fun updateLocked(): Boolean {
++    private suspend fun updateLocked() {
          if (updateJob === currentCoroutineContext()[Job]) updateJob = null else unscheduleUpdateLocked()
 -        if (records.isEmpty() && activeClients.isEmpty()) return
-+        if (records.isEmpty() && activeClients.isEmpty()) return true
-+        var complete = true
++        if (records.isEmpty() && activeClients.isEmpty()) return
          try {
              val counters = DaemonController.readTrafficCounters()
-+            if (counters.isEmpty()) {
-+                scheduleUpdateLocked()
-+                return false
-+            }
              val timestamp = System.currentTimeMillis()
              lastUpdate = timestamp
              val oldRecords = MutableLongObjectMap<TrafficRecord>()
-@@ -128,6 +138,7 @@ object TrafficRecorder {
-             loop@ for (counter in counters) {
-                 try {
-                     val key = counterKey(counter) ?: run {
-+                        complete = false
-                         Timber.w("Ignoring unsupported traffic counter source: $counter")
-                         continue@loop
-                     }
-@@ -171,7 +182,10 @@ object TrafficRecorder {
+@@ -171,7 +182,9 @@ object TrafficRecorder {
                          check(records.put(key, record) == oldRecord)
                          oldRecords[oldId] = oldRecord
                      }
 +                } catch (e: CancellationException) {
 +                    throw e
                  } catch (e: Exception) {
-+                    complete = false
                      Timber.w(counter.toString())
                      Timber.w(e)
                  }
-@@ -188,12 +202,15 @@ object TrafficRecorder {
+@@ -188,12 +202,12 @@ object TrafficRecorder {
              val newRecords = MutableObjectList<TrafficRecord>(records.size)
              records.forEachValue { newRecords.add(it) }
              foregroundUpdatesState.tryEmit(ForegroundUpdate(newRecords, oldRecords))
 -        } catch (_: CancellationException) {
-+        } catch (e: CancellationException) {
-+            throw e
++        } catch (_: CancellationException) {
          } catch (e: Exception) {
-+            complete = false
              Timber.w(e)
              SmartSnackbar.make(e).show()
          }
          if (records.isNotEmpty() || activeClients.isNotEmpty()) scheduleUpdateLocked()
-+        return complete
      }
  
      suspend fun clean() = updateMutex.withLock {

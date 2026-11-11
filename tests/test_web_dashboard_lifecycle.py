@@ -27,6 +27,9 @@ class DashboardWiringTest(unittest.TestCase):
         cls.core = (Path(root) / "mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt").read_text(
             encoding="utf-8"
         )
+        cls.source_patch = (Path(__file__).parents[1] / "patches/0005-web-admin.patch").read_text(
+            encoding="utf-8"
+        )
 
     def test_manager_starts_web_listener(self):
         self.assertRegex(self.routing, r"WebAdmin\.(?:addInterface|start)\(downstream\)",
@@ -65,10 +68,15 @@ class DashboardWiringTest(unittest.TestCase):
         self.assertIn("session.resources.attach(socket)", self.web)
         self.assertIn("connectionScope.launch", self.web)
 
-    def test_dashboard_status_refresh_is_cached_and_serialized(self):
-        self.assertIn("Mutex()", self.core)
-        self.assertIn("now - at!! >= 1000", self.core)
-        self.assertIn("session.cache.read", self.web)
-        self.assertIn("TrafficRecorder.dashboardSnapshot()", self.web)
+    def test_dashboard_sampler_does_not_poll_or_persist_on_request(self):
+        snapshot = self.web[self.web.index("dashboardSnapshot") :] if "dashboardSnapshot" in self.web else ""
+        self.assertNotIn("readTrafficCounters", snapshot)
+        self.assertNotIn("trafficRecordDao", self.web)
+        self.assertIn("Copy recorder state only", self.source_patch)
+
+    def test_dashboard_reports_vpn_separately_and_expires_neighbours(self):
+        self.assertIn("Upstreams.vpn.collect", self.web)
+        self.assertIn("neighboursAt", self.web)
+        self.assertIn("<= 3000", self.web)
 
 

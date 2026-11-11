@@ -2,7 +2,7 @@ name: Dashboard patched source
 
 on:
   push:
-    branches: [agent/web-dashboard]
+    branches: [agent/web-review-fixes]
   workflow_dispatch:
 
 permissions:
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   verify:
-    if: github.ref == 'refs/heads/agent/web-dashboard'
+    if: github.ref == 'refs/heads/agent/web-review-fixes'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

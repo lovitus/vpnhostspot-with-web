@@ -107,25 +107,29 @@ fun main() = runBlocking {
         now = 1000
         check((1..64).map { async(Dispatchers.Default) { read() } }.awaitAll().toSet() == setOf("snapshot-2"))
         check(loads.get() == 2)
-        println("PASS concurrent readers share an immutable snapshot for at least one second")
+        now = 2000
+        val cancelled = launch { cache.read { delay(10_000); "never" } }
+        delay(20); cancelled.cancelAndJoin()
+        check(cache.read { "snapshot-after-cancel" } == "snapshot-after-cancel")
+        println("PASS concurrent readers share an immutable snapshot and cancellation releases the cache")
     }
     if (mode == "all" || mode == "traffic") {
         val samples = DashboardTraffic()
         val a = DashboardTraffic.Counter("a", "mac", 100, 200)
         val b = DashboardTraffic.Counter("b", "mac", 50, 80)
         val first = samples.sample(listOf(a, b), 0, true)
-        check(first.totals.getValue("mac").sent == 150L)
+        check(first.totals.getValue("mac").sent == 0L)
         check(first.rates["mac"] == null)
         val next = samples.sample(listOf(a.copy(sent = 200, received = 400), b), 1000, true)
         check(next.rates.getValue("mac").sent == 100L)
         val failed = samples.sample(emptyList(), 2000, false)
         check(!failed.available && failed.totals == next.totals && failed.rates.isEmpty())
-        val recovered = samples.sample(listOf(a.copy(sent = 400, received = 600)), 3000, true)
-        check(recovered.totals.getValue("mac").sent == 450L) // disappearing source retains session bytes
-        check(recovered.rates.getValue("mac").sent == 100L) // two seconds since successful sample
-        val reset = samples.sample(listOf(a.copy(sent = 10, received = 20)), 4000, true)
-        check(reset.totals.getValue("mac").sent == 460L)
-        check(reset.rates.getValue("mac").sent == 10L)
+        val recovered = samples.sample(listOf(b.copy(sent = 180, received = 300)), 3000, true)
+        check(recovered.totals.getValue("mac").sent == 230L) // a source disappearance preserves totals
+        check(recovered.rates.getValue("mac").sent == 65L)
+        val reset = samples.sample(listOf(a.copy(sent = 10, received = 20), b.copy(sent = 180, received = 300)), 4000, true)
+        check(reset.totals.getValue("mac").sent == 230L) // recreated/reset sources are not counted as deltas
+        check(reset.rates["mac"] == null) // rate is unavailable across a source generation change
         println("PASS traffic failure preservation, rates, source churn and counter resets")
         val clients = dashboardClients(listOf("mac" to "192.168.1.2", "mac" to "fe80::2",
             "mac" to "192.168.1.2", null to "192.168.1.3", "other" to "192.168.1.4"))
