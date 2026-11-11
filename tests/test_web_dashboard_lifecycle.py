@@ -40,4 +40,28 @@ class DashboardWiringTest(unittest.TestCase):
         self.assertIn("listeners.remove(iface)?.close()", self.web)
         self.assertIn("WebAdmin.stop(downstream)", self.routing)
 
+    def test_dashboard_csp_allows_same_origin_status_fetch(self):
+        self.assertIn("connect-src 'self'", self.web)
+
+    def test_dashboard_uses_bounded_deadline_reader(self):
+        self.assertIn("REQUEST_DEADLINE_MS", self.web)
+        self.assertIn("readLine(MAX_LINE", self.web)
+        self.assertNotIn("reader.readLine()", self.web)
+        self.assertIn("System.nanoTime()", self.web)
+
+    def test_dashboard_isolates_connection_io_failures(self):
+        self.assertIn("catch (_: IOException)", self.web)
+        self.assertIn("catch (_: SocketException)", self.web)
+
+    def test_dashboard_cleanup_is_generation_and_identity_bound(self):
+        self.assertIn("generation", self.web)
+        self.assertIn("listeners.remove(iface, it)", self.web)
+        self.assertIn("jobs.remove(iface, current)", self.web)
+
+    def test_dashboard_status_refresh_is_cached_and_serialized(self):
+        self.assertIn("Mutex()", self.web)
+        self.assertIn("SNAPSHOT_MIN_INTERVAL_MS", self.web)
+        self.assertIn("snapshotMutex.withLock", self.web)
+        self.assertIn("TrafficRecorder.update()", self.web)
+
 

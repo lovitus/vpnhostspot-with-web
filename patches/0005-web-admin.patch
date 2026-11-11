@@ -20,10 +20,10 @@ index ec1ab859..60b3ec08 100644
          } finally {
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
 new file mode 100644
-index 00000000..5914d62d
+index 00000000..aa61658f
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,222 @@
 +package be.mygod.vpnhotspot
 +
 +import be.mygod.vpnhotspot.net.NetlinkNeighbour
@@ -68,18 +68,24 @@ index 00000000..5914d62d
 +    private var neighbourJob: Job? = null
 +    private data class TrafficTotals(val sent: Long, val received: Long)
 +
-+    fun start(iface: String) {
-+        if (jobs.containsKey(iface)) return
++    fun start(iface: String) = synchronized(lifecycleLock) {
++        if (jobs[iface]?.isActive == true) return@synchronized
++        jobs.remove(iface)
++        val generation = nextGeneration.incrementAndGet()
++        generations[iface] = generation
++        clients[iface] = AtomicInteger()
 +        if (neighbourJob == null) neighbourJob = scope.launch {
 +            NetlinkNeighbour.snapshots.collect { snapshot ->
 +                jobs.keys.forEach { downstream -> neighbours[downstream] = snapshot.filter { it.dev == downstream } }
 +            }
 +        }
-+        clients[iface] = AtomicInteger()
-+        jobs[iface] = scope.launch { serve(iface) }
++        val job = scope.launch(start = CoroutineStart.LAZY) { serve(iface, generation) }
++        jobs[iface] = job
++        job.start()
 +    }
 +
-+    fun stop(iface: String) {
++    fun stop(iface: String) = synchronized(lifecycleLock) {
++        generations.remove(iface)
 +        jobs.remove(iface)?.cancel()
 +        listeners.remove(iface)?.close()
 +        clients.remove(iface)
@@ -87,41 +93,82 @@ index 00000000..5914d62d
 +        neighbours.remove(iface)
 +        lastTraffic.remove(iface)
 +        lastTrafficAt.remove(iface)
-+        if (jobs.isEmpty()) {
-+            neighbourJob?.cancel()
-+            neighbourJob = null
-+        }
++        if (jobs.isEmpty()) { neighbourJob?.cancel(); neighbourJob = null }
 +    }
 +
-+    private suspend fun serve(iface: String) {
++    private fun isCurrent(iface: String, generation: Long, job: Job) =
++        generations[iface] == generation && jobs[iface] === job && job.isActive
++
++    private suspend fun serve(iface: String, generation: Long) {
++        val current = currentCoroutineContext()[Job] ?: return
 +        try {
-+            while (scope.isActive && jobs[iface]?.isActive == true) {
++            while (scope.isActive && isCurrent(iface, generation, current)) {
 +                val address = gatewayAddress(iface) ?: run { delay(500); continue }
++                var server: ServerSocket? = null
 +                try {
-+                    ServerSocket(PORT, 16, address).use { server ->
-+                        listeners[iface] = server
++                    ServerSocket(PORT, 16, address).use { candidate ->
++                        if (!isCurrent(iface, generation, current)) return@use
++                        server = candidate
++                        listeners[iface] = candidate
 +                        gatewayAddresses[iface] = address.hostAddress.orEmpty()
-+                        while (scope.isActive && jobs[iface]?.isActive == true) {
-+                            val socket = server.accept()
++                        while (scope.isActive && isCurrent(iface, generation, current)) {
++                            val socket = candidate.accept()
 +                            val count = clients[iface] ?: AtomicInteger(MAX_CLIENTS)
-+                            if (count.incrementAndGet() > MAX_CLIENTS) {
-+                                count.decrementAndGet()
-+                                socket.close()
-+                            } else scope.launch {
-+                                try { handle(socket, iface) } finally { count.decrementAndGet() }
++                            if (count.incrementAndGet() > MAX_CLIENTS) { count.decrementAndGet(); socket.close() }
++                            else scope.launch {
++                                try { handle(socket, iface) }
++                                catch (_: IOException) { }
++                                finally { count.decrementAndGet() }
 +                            }
 +                        }
 +                    }
 +                } catch (_: SocketException) {
-+                    if (scope.isActive && jobs[iface]?.isActive == true) delay(250)
-+                } catch (_: SecurityException) {
-+                    return
-+                }
++                    if (scope.isActive && isCurrent(iface, generation, current)) delay(250)
++                } catch (_: IOException) {
++                    if (scope.isActive && isCurrent(iface, generation, current)) delay(250)
++                } catch (_: SecurityException) { return }
++                finally { server?.let { listeners.remove(iface, it); it.close() } }
 +            }
 +        } finally {
-+            listeners.remove(iface)?.close()
-+            jobs.remove(iface)
-+            gatewayAddresses.remove(iface)
++            listeners[iface]?.let { listeners.remove(iface, it); it.close() }
++            jobs.remove(iface, current)
++            if (generations[iface] == generation) { generations.remove(iface, generation); gatewayAddresses.remove(iface) }
++        }
++    }
++
++    private class RequestReader(private val input: InputStream, private val socket: Socket, private val deadlineNanos: Long) {
++        fun readLine(maxLength: Int): String? {
++            val bytes = ByteArrayOutputStream()
++            while (true) {
++                val remaining = deadlineNanos - System.nanoTime()
++                if (remaining <= 0) return null
++                socket.soTimeout = max(1, (remaining / 1_000_000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
++                val value = input.read()
++                if (value < 0) return if (bytes.size() == 0) null else bytes.toString(Charsets.US_ASCII.name())
++                if (value == '\\n'.code) return bytes.toString(Charsets.US_ASCII.name()).removeSuffix("\\r")
++                if (bytes.size() >= maxLength) return null
++                bytes.write(value)
++            }
++        }
++    }
++
++    private suspend fun handle(socket: Socket, iface: String) {
++        socket.use { connection ->
++            val reader = RequestReader(connection, connection, System.nanoTime() + REQUEST_DEADLINE_MS * 1_000_000L)
++            val request = reader.readLine(MAX_LINE) ?: return
++            val parts = request.split(' ', limit = 3)
++            var headers = 0
++            while (true) {
++                val line = reader.readLine(MAX_LINE) ?: return
++                if (++headers > MAX_HEADERS) return
++                if (line.isEmpty()) break
++            }
++            if (parts.size < 2 || parts[0] != "GET") { reply(connection, 405, "text/plain; charset=utf-8", "method not allowed"); return }
++            when (parts[1].substringBefore('?')) {
++                "/", "/index.html" -> reply(connection, 200, "text/html; charset=utf-8", INDEX)
++                "/api/status" -> reply(connection, 200, "application/json; charset=utf-8", status(iface))
++                else -> reply(connection, 404, "text/plain; charset=utf-8", "not found")
++            }
 +        }
 +    }
 +
@@ -157,33 +204,35 @@ index 00000000..5914d62d
 +    private fun reply(socket: Socket, code: Int, type: String, body: String) {
 +        val bytes = body.toByteArray(Charsets.UTF_8)
 +        val output = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
-+        output.write("HTTP/1.1 $code ${if (code == 200) "OK" else if (code == 404) "Not Found" else "Method Not Allowed"}\r\nContent-Type: $type\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\r\nConnection: close\r\nContent-Length: ${bytes.size}\r\n\r\n")
++        output.write("HTTP/1.1 $code ${if (code == 200) "OK" else if (code == 404) "Not Found" else "Method Not Allowed"}\r\nContent-Type: $type\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\r\nConnection: close\r\nContent-Length: ${bytes.size}\r\n\r\n")
 +        output.flush()
 +        socket.getOutputStream().write(bytes)
 +        socket.getOutputStream().flush()
 +    }
 +
-+    private suspend fun status(iface: String): String {
-+        try { TrafficRecorder.update() } catch (_: Exception) { }
-+        val totals = HashMap<String, TrafficTotals>()
-+        try {
-+            TrafficRecorder.snapshot().filter { it.downstream == iface }.forEach { record ->
++    private suspend fun status(iface: String): String = snapshotMutex.withLock {
++        val now = System.currentTimeMillis()
++        if (now - snapshotAt >= SNAPSHOT_MIN_INTERVAL_MS) {
++            val refreshed = HashMap<String, MutableMap<String, TrafficTotals>>()
++            try { TrafficRecorder.update() } catch (_: Exception) { }
++            try { TrafficRecorder.snapshot().forEach { record ->
++                val totals = refreshed.getOrPut(record.downstream) { HashMap() }
 +                val old = totals[record.mac.toString()] ?: TrafficTotals(0, 0)
 +                totals[record.mac.toString()] = TrafficTotals(old.sent + record.sentBytes, old.received + record.receivedBytes)
-+            }
-+        } catch (_: Exception) { }
-+        val now = System.currentTimeMillis()
++            } } catch (_: Exception) { }
++            trafficSnapshot = refreshed.mapValues { it.value.toMap() }
++            snapshotAt = now
++        }
++        val totals = trafficSnapshot[iface].orEmpty()
 +        val old = lastTraffic.put(iface, totals) ?: emptyMap()
 +        val elapsed = max(1L, now - (lastTrafficAt.put(iface, now) ?: now))
 +        val clientJson = neighbours[iface].orEmpty().mapNotNull { neighbour ->
 +            val mac = neighbour.validClientMac?.toString() ?: return@mapNotNull null
 +            val current = totals[mac] ?: TrafficTotals(0, 0)
 +            val previous = old[mac] ?: current
-+            val send = rate(current.sent - previous.sent, elapsed)
-+            val receive = rate(current.received - previous.received, elapsed)
-+            "{\"mac\":${json(mac)},\"ip\":${json(neighbour.ip.hostAddress.orEmpty())},\"sendBytesPerSecond\":$send,\"receiveBytesPerSecond\":$receive,\"sendBytes\":${current.sent},\"receiveBytes\":${current.received}}"
++            "{\\"mac\\":${json(mac)},\\"ip\\":${json(neighbour.ip.hostAddress.orEmpty())},\\"sendBytesPerSecond\\":${rate(current.sent - previous.sent, elapsed)},\\"receiveBytesPerSecond\\":${rate(current.received - previous.received, elapsed)},\\"sendBytes\\":${current.sent},\\"receiveBytes\\":${current.received}}"
 +        }
-+        return "{\"schema\":1,\"downstream\":${json(iface)},\"gateway\":${json(gatewayAddresses[iface].orEmpty())},\"clientCount\":${clientJson.size},\"clients\":[${clientJson.joinToString(",")}],\"vpn\":${upstreamJson(Upstreams.primary.value)},\"fallback\":${upstreamJson(Upstreams.fallback.value)}}"
++        "{\\"schema\\":1,\\"downstream\\":${json(iface)},\\"gateway\\":${json(gatewayAddresses[iface].orEmpty())},\\"clientCount\\":${clientJson.size},\\"clients\\":[${clientJson.joinToString(",")}],\\"vpn\\":${upstreamJson(Upstreams.primary.value)},\\"fallback\\":${upstreamJson(Upstreams.fallback.value)}}"
 +    }
 +
 +    private fun rate(delta: Long, elapsed: Long) = delta.coerceAtLeast(0) * 1000 / elapsed
