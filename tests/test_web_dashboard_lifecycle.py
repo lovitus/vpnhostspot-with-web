@@ -24,6 +24,9 @@ class DashboardWiringTest(unittest.TestCase):
         cls.web = (Path(root) / "mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt").read_text(
             encoding="utf-8"
         )
+        cls.core = (Path(root) / "mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt").read_text(
+            encoding="utf-8"
+        )
 
     def test_manager_starts_web_listener(self):
         self.assertRegex(self.routing, r"WebAdmin\.(?:addInterface|start)\(downstream\)",
@@ -31,37 +34,41 @@ class DashboardWiringTest(unittest.TestCase):
 
     def test_dashboard_listener_is_bounded_and_read_only(self):
         self.assertIn("ServerSocket(PORT, 16, address)", self.web)
-        self.assertIn("MAX_HEADERS = 64", self.web)
-        self.assertIn("MAX_CLIENTS = 16", self.web)
-        self.assertIn('parts[0] != "GET"', self.web)
+        self.assertIn("MAX_HEADERS = 64", self.core)
+        self.assertIn("sockets.size >= 16", self.core)
+        self.assertIn('request.method != "GET"', self.web)
         self.assertNotRegex(self.web, r"(?i)\\b(?:POST|PUT|PATCH|DELETE)\\b")
 
     def test_dashboard_closes_listener_on_stop(self):
-        self.assertIn("listeners.remove(iface)?.close()", self.web)
+        self.assertIn("session.resources.stop()", self.web)
         self.assertIn("WebAdmin.stop(downstream)", self.routing)
+        stop = self.routing[self.routing.index("suspend fun stop()") :]
+        self.assertLess(stop.index("WebAdmin.stop(downstream)"), stop.index("} ?: return"))
+        self.assertIn("WebAdmin.stop(manager.downstream)", self.routing)
 
     def test_dashboard_csp_allows_same_origin_status_fetch(self):
         self.assertIn("connect-src 'self'", self.web)
 
     def test_dashboard_uses_bounded_deadline_reader(self):
         self.assertIn("REQUEST_DEADLINE_MS", self.web)
-        self.assertIn("readLine(MAX_LINE", self.web)
-        self.assertNotIn("reader.readLine()", self.web)
-        self.assertIn("System.nanoTime()", self.web)
+        self.assertIn("DashboardHttp.read(socket", self.web)
+        self.assertIn("DashboardDeadline.arm(socket", self.web)
+        self.assertIn("System.nanoTime()", self.core)
 
     def test_dashboard_isolates_connection_io_failures(self):
         self.assertIn("catch (_: IOException)", self.web)
-        self.assertIn("catch (_: SocketException)", self.web)
+        self.assertIn("Dashboard unavailable on", self.web)
 
     def test_dashboard_cleanup_is_generation_and_identity_bound(self):
-        self.assertIn("generation", self.web)
-        self.assertIn("listeners.remove(iface, it)", self.web)
-        self.assertIn("jobs.remove(iface, current)", self.web)
+        self.assertIn("sessions[iface] === session", self.web)
+        self.assertIn("session.resources.publish(candidate)", self.web)
+        self.assertIn("session.resources.attach(socket)", self.web)
+        self.assertIn("connectionScope.launch", self.web)
 
     def test_dashboard_status_refresh_is_cached_and_serialized(self):
-        self.assertIn("Mutex()", self.web)
-        self.assertIn("SNAPSHOT_MIN_INTERVAL_MS", self.web)
-        self.assertIn("snapshotMutex.withLock", self.web)
-        self.assertIn("TrafficRecorder.update()", self.web)
+        self.assertIn("Mutex()", self.core)
+        self.assertIn("now - at!! >= 1000", self.core)
+        self.assertIn("session.cache.read", self.web)
+        self.assertIn("TrafficRecorder.dashboardSnapshot()", self.web)
 
 

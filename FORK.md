@@ -4,7 +4,20 @@
 
 另有一个 Rust 1.99 Clippy 兼容补丁：ICMP 校验和按两个字节迭代的写法改用 `as_chunks::<2>()`。输入为固定 16 字节数组，校验和计算、路由行为及外部状态均不改变，因此不需要新增 routing.md 状态说明。维护分支的上游 master 已将相关函数拆到 `icmp_quote.rs`，稳定版补丁仍针对 v3.0.8 的 `icmp_wire.rs` 重放。
 
-另有一个只读 Web 状态页面补丁 `patches/0005-web-admin.patch`。它在已有 downstream routing session 启动后，使用 app 进程绑定实际 downstream IPv4 地址的 80 端口，提供 `/` 和 `/api/status`；页面显示客户端邻居、累计流量、实时速率、VPN/fallback 网络和接口。它不鉴权，但没有封禁、配置修改、root 命令或控制 API；`vpnhotspot.lan` 只在 daemon DNS 中精确返回默认 P2P 网关 `192.168.49.1`，其他查询仍走原有 resolver。非默认网关地址请优先使用页面显示的数字地址。
+另有一个只读 Web 状态页面补丁 `patches/0005-web-admin.patch`。它在已有 downstream routing session 启动后，使用 app 进程绑定实际 downstream IPv4 地址的 80 端口，提供 `/` 和 `/api/status`。页面按 MAC 合并观测到的 IPv4/IPv6 邻居，显示已采样来源的记录字节、速率、primary/fallback 网络及地址；邻居数量不是 Wi-Fi 关联数量，primary 也不一定是 VPN，不代表每个客户端的实际出口。它不鉴权，没有封禁、配置修改、root 命令或控制 API。`vpnhotspot.lan` 在已有 daemon DNS 处理路径精确匹配，A 记录使用实际 downstream 网关、TTL 5 秒，AAAA 返回 NODATA；其他名称仍走原有 resolver。使用其他 DNS 的客户端可直接访问数字网关。
+
+监听器与已接受连接由同一代 session 拥有，停止或 Clean 时立即关闭；旧任务的清理不能关闭新一代监听器。每个 downstream 最多 16 个请求，单行 4096 字节、最多 64 个头；3 秒绝对期限包括读取及响应写入。Host 仅接受实际绑定的数字地址或精确 `vpnhotspot.lan`（可带 `:80`）。80 端口绑定失败通过日志与应用提示报告，不启动 root HTTP 服务。状态 JSON 按接口缓存至少一秒，共享一次 recorder 采样及时间戳；失败/部分数据保留上次总量并标为 unavailable，速率为 null。总量以首次采样的现有 counter 为起点，再累计观测到的差值，保留消失来源的字节；不等同数据库历史总量，无法重建两次采样之间创建后又删除的来源。
+
+可执行回归（需要 JDK、含 compiler/stdlib/coroutines 的 Gradle lib 缓存；也可设置 `KOTLIN_LIB`）和独立 DNS wire 测试：
+
+```sh
+python tests/run_dashboard_behavior.py PATCHED_SOURCE
+VPNHOTSPOT_SOURCE=PATCHED_SOURCE python -m unittest discover -s tests -p 'test_web_dashboard_lifecycle.py'
+rustc --test PATCHED_SOURCE/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs -o DNS_TEST_BINARY
+DNS_TEST_BINARY
+```
+
+JVM 测试实际运行 patch 中的 Kotlin helper、真实 loopback sockets、并发读者及阻塞写入。Python 检查仅验证 Android lifecycle 接线，不能替代设备实测。尚需在目标 Android/ROM 验证端口权限、热点 ingress 隔离、真实 DNS 转发、VPN 重连及 Clean；本次只验证补丁重放和编译，不签名、安装或发布。
 
 
 `iptables-restore: line 10 failed` 本身不足以确认每一台设备的原因。若重启或本补丁的 Clean/reapply 后仍出错，需要应用版本、Android/ROM 版本、触发操作及“导出调试信息”里的 restore 输入。
