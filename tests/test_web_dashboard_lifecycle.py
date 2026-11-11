@@ -27,6 +27,9 @@ class DashboardWiringTest(unittest.TestCase):
         cls.core = (Path(root) / "mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt").read_text(
             encoding="utf-8"
         )
+        cls.source_patch = (Path(__file__).parents[1] / "patches/0005-web-admin.patch").read_text(
+            encoding="utf-8"
+        )
 
     def test_manager_starts_web_listener(self):
         self.assertRegex(self.routing, r"WebAdmin\.(?:addInterface|start)\(downstream\)",
@@ -65,10 +68,23 @@ class DashboardWiringTest(unittest.TestCase):
         self.assertIn("session.resources.attach(socket)", self.web)
         self.assertIn("connectionScope.launch", self.web)
 
-    def test_dashboard_status_refresh_is_cached_and_serialized(self):
-        self.assertIn("Mutex()", self.core)
-        self.assertIn("now - at!! >= 1000", self.core)
-        self.assertIn("session.cache.read", self.web)
-        self.assertIn("TrafficRecorder.dashboardSnapshot()", self.web)
+    def test_dashboard_sampler_does_not_poll_or_persist_on_request(self):
+        status = self.web[self.web.index("private fun status("):self.web.index("private fun upstreamJson")]
+        self.assertNotIn("readTrafficCounters", status)
+        self.assertNotIn("trafficRecordDao", self.web)
+        self.assertIn("DashboardSampler", self.web)
+        self.assertIn("session.cache.peek()", status)
+        self.assertNotIn(".read {", status)
+        self.assertNotIn(".sample(", status)
+        self.assertIn("private fun status(", status,
+                      "HTTP status must read published state without suspending behind a sampler")
+        self.assertNotIn("TrafficRecorder.dashboardSnapshot()", self.web)
+        self.assertEqual(self.web.count("DaemonController.readTrafficCounters()"), 1)
+        self.assertIn("samplerJob.start()", self.web)
+
+    def test_dashboard_reports_vpn_separately_and_expires_neighbours(self):
+        self.assertIn("Upstreams.vpn.collect", self.web)
+        self.assertIn("neighboursAt", self.web)
+        self.assertIn("<= 3000", self.web)
 
 

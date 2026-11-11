@@ -107,25 +107,114 @@ fun main() = runBlocking {
         now = 1000
         check((1..64).map { async(Dispatchers.Default) { read() } }.awaitAll().toSet() == setOf("snapshot-2"))
         check(loads.get() == 2)
-        println("PASS concurrent readers share an immutable snapshot for at least one second")
+        now = 2000
+        val cancelled = launch { cache.read { delay(10_000); "never" } }
+        delay(20); cancelled.cancelAndJoin()
+        check(cache.read { "snapshot-after-cancel" } == "snapshot-after-cancel")
+        println("PASS concurrent readers share an immutable snapshot and cancellation releases the cache")
+    }
+    if (mode == "all" || mode == "sampling") {
+        val owner = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val entered = CompletableDeferred<Unit>()
+        val cancelling = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val calls = AtomicInteger()
+        var now = 0L
+        val cache = DashboardCache<String> { now }
+        val sampler = DashboardSampler(owner, 200) {
+            when (calls.incrementAndGet()) {
+                1 -> "initial"
+                2 -> try {
+                    entered.complete(Unit)
+                    awaitCancellation()
+                } finally {
+                    cancelling.complete(Unit)
+                    // Model DaemonController's potentially stalled NonCancellable cleanup.
+                    withContext(NonCancellable) { release.await() }
+                }
+                else -> "recovered"
+            }
+        }
+        try {
+            check(cache.peek() == null)
+            check(cache.read { sampler.read()!! } == "initial")
+            now = 1000
+            val cycle = async { cache.read { sampler.read() ?: "unavailable" } }
+            withTimeout(2000) { entered.await() }
+            // Both direct status readers and real HTTP exchanges use the same production peek
+            // as WebAdmin.status. The loader mutex is held throughout the stalled cycle.
+            withTimeout(2000) {
+                check((1..64).map { async(Dispatchers.Default) { cache.peek() } }
+                    .awaitAll().all { it in setOf("initial", "unavailable") })
+                ServerSocket(0, 64, InetAddress.getLoopbackAddress()).use { server ->
+                    val serving = async(Dispatchers.IO) {
+                        coroutineScope {
+                            repeat(32) {
+                                val socket = server.accept()
+                                launch(Dispatchers.IO) {
+                                    socket.use {
+                                        check(DashboardHttp.read(it, System.nanoTime() + 1_000_000_000)?.path == "/api/status")
+                                        val body = cache.peek()!!
+                                        it.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\n\r\n" + body).toByteArray())
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    val responses = (1..32).map {
+                        async(Dispatchers.IO) {
+                            Socket(server.inetAddress, server.localPort).use { client ->
+                                client.soTimeout = 1500
+                                client.getOutputStream().write("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".toByteArray())
+                                client.getInputStream().readBytes().toString(Charsets.US_ASCII)
+                            }
+                        }
+                    }.awaitAll()
+                    check(responses.all { it.startsWith("HTTP/1.1 200 OK") &&
+                        it.substringAfter("\r\n\r\n") in setOf("initial", "unavailable") })
+                    serving.await()
+                }
+            }
+            withTimeout(2000) { cancelling.await(); check(cycle.await() == "unavailable") }
+            repeat(20) { check(sampler.read() == null) }
+            check(calls.get() == 2) // no extra reads while cancellation cleanup is quarantined
+            check(!release.isCompleted) // HTTP/status finished before releasing the stalled read
+            release.complete(Unit)
+            withTimeout(2000) { owner.coroutineContext[Job]!!.children.toList().forEach { it.join() } }
+            now = 2000
+            check(cache.read { sampler.read()!! } == "recovered")
+            check(cache.peek() == "recovered" && calls.get() == 3)
+            println("PASS cached status and 32 HTTP exchanges during stalled sampling; bounded timeout, quarantine and recovery")
+        } finally {
+            release.complete(Unit)
+            owner.cancel()
+        }
+        val fresh = DashboardTraffic.Sample(mapOf("mac" to DashboardTraffic.Totals(123, 456)),
+            mapOf("mac" to DashboardTraffic.Totals(10, 20)), true)
+        val snapshot = DashboardTrafficSnapshot(fresh, 1000, 9999)
+        check(snapshot.current(4000) == fresh)
+        val stale = snapshot.current(4001)
+        check(!stale.available && stale.rates.isEmpty() && stale.totals == fresh.totals)
+        check(snapshot.current(1000) == fresh) // reading does not mutate the published sample
+        println("PASS stale traffic suppresses rates and retains immutable totals")
     }
     if (mode == "all" || mode == "traffic") {
         val samples = DashboardTraffic()
         val a = DashboardTraffic.Counter("a", "mac", 100, 200)
         val b = DashboardTraffic.Counter("b", "mac", 50, 80)
         val first = samples.sample(listOf(a, b), 0, true)
-        check(first.totals.getValue("mac").sent == 150L)
+        check(first.totals.getValue("mac").sent == 0L)
         check(first.rates["mac"] == null)
         val next = samples.sample(listOf(a.copy(sent = 200, received = 400), b), 1000, true)
         check(next.rates.getValue("mac").sent == 100L)
         val failed = samples.sample(emptyList(), 2000, false)
         check(!failed.available && failed.totals == next.totals && failed.rates.isEmpty())
-        val recovered = samples.sample(listOf(a.copy(sent = 400, received = 600)), 3000, true)
-        check(recovered.totals.getValue("mac").sent == 450L) // disappearing source retains session bytes
-        check(recovered.rates.getValue("mac").sent == 100L) // two seconds since successful sample
-        val reset = samples.sample(listOf(a.copy(sent = 10, received = 20)), 4000, true)
-        check(reset.totals.getValue("mac").sent == 460L)
-        check(reset.rates.getValue("mac").sent == 10L)
+        val recovered = samples.sample(listOf(b.copy(sent = 180, received = 300)), 3000, true)
+        check(recovered.totals.getValue("mac").sent == 230L) // a source disappearance preserves totals
+        check(recovered.rates.getValue("mac").sent == 65L)
+        val reset = samples.sample(listOf(a.copy(sent = 10, received = 20), b.copy(sent = 180, received = 300)), 4000, true)
+        check(reset.totals.getValue("mac").sent == 230L) // recreated/reset sources are not counted as deltas
+        check(reset.rates["mac"] == null) // rate is unavailable across a source generation change
         println("PASS traffic failure preservation, rates, source churn and counter resets")
         val clients = dashboardClients(listOf("mac" to "192.168.1.2", "mac" to "fe80::2",
             "mac" to "192.168.1.2", null to "192.168.1.3", "other" to "192.168.1.4"))

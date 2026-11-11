@@ -2,7 +2,7 @@ name: Dashboard patched source
 
 on:
   push:
-    branches: [agent/web-dashboard, agent/signed-test-ci]
+    branches: [agent/web-review-fixes, agent/web-lock-fix]
   workflow_dispatch:
 
 permissions:
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   verify:
-    if: github.ref == 'refs/heads/agent/web-dashboard' || github.ref == 'refs/heads/agent/signed-test-ci'
+    if: github.ref == 'refs/heads/agent/web-review-fixes' || github.ref == 'refs/heads/agent/web-lock-fix'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -31,6 +31,10 @@ jobs:
           git -C patched submodule update --init --recursive
           sha256sum patches/0005-web-admin.patch
           git -C patched diff --stat
+      - name: Check request path isolation before compilation
+        env:
+          VPNHOTSPOT_SOURCE: ${{ github.workspace }}/patched
+        run: python3 -m unittest discover -s tests -p 'test_web_dashboard_lifecycle.py' -v
       - uses: actions/setup-java@v5
         with:
           distribution: temurin

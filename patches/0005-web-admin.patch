@@ -26,10 +26,10 @@ index f7218955d9a9df7388c3b8abfbc322db5fc8dd20..527809e483bd7df27f2a4f6855ae820d
  - `android_res_nsend` starts a one-shot query on the selected Android network;
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..1270b4e196f44dbd69ff9447af2ce4de61b69823
+index 0000000000000000000000000000000000000000..7e95d9e822e6f0a8c0a1107a5d9763d05275c5a3
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,190 @@
 +package be.mygod.vpnhotspot
 +
 +import java.io.ByteArrayOutputStream
@@ -37,6 +37,10 @@ index 0000000000000000000000000000000000000000..1270b4e196f44dbd69ff9447af2ce4de
 +import java.net.Socket
 +import java.util.concurrent.ScheduledThreadPoolExecutor
 +import java.util.concurrent.TimeUnit
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Deferred
++import kotlinx.coroutines.async
++import kotlinx.coroutines.withTimeoutOrNull
 +import kotlinx.coroutines.sync.Mutex
 +import kotlinx.coroutines.sync.withLock
 +
@@ -127,7 +131,9 @@ index 0000000000000000000000000000000000000000..1270b4e196f44dbd69ff9447af2ce4de
 +internal class DashboardCache<T>(private val clock: () -> Long = { System.nanoTime() / 1_000_000 }) {
 +    private val mutex = Mutex()
 +    private var at: Long? = null
-+    private var value: T? = null
++    @Volatile private var value: T? = null
++    // HTTP readers never take the loader mutex or run load(). T must be an immutable value.
++    fun peek(): T? = value
 +    suspend fun read(load: suspend () -> T): T = mutex.withLock {
 +        val now = clock()
 +        if (at == null || now - at!! >= 1000) {
@@ -139,21 +145,52 @@ index 0000000000000000000000000000000000000000..1270b4e196f44dbd69ff9447af2ce4de
 +    }
 +}
 +
++/**
++ * One background owner calls read(). The deferred belongs to a separate supervisor scope so
++ * timeout does not join daemon cancellation cleanup. Quarantine an unfinished cancellation;
++ * never queue another counter read until it completes, and never accept its late result.
++ */
++internal class DashboardSampler<T : Any>(
++    private val scope: CoroutineScope,
++    private val timeoutMillis: Long,
++    private val load: suspend () -> T,
++) {
++    private var pending: Deferred<T>? = null
++    suspend fun read(): T? {
++        if (pending?.isCompleted == false) return null
++        val read = scope.async { load() }
++        pending = read
++        return try {
++            withTimeoutOrNull(timeoutMillis) { read.await() }
++        } finally {
++            if (!read.isCompleted) read.cancel()
++        }
++    }
++}
++
 +/** Accumulate deltas by recorder source, preserving completed sources for this dashboard session. */
 +internal class DashboardTraffic {
 +    data class Counter(val source: String, val mac: String, val sent: Long, val received: Long)
 +    data class Totals(val sent: Long, val received: Long)
 +    data class Sample(val totals: Map<String, Totals>, val rates: Map<String, Totals>, val available: Boolean)
 +    private val previous = HashMap<String, Counter>()
++    private val retired = HashSet<String>()
 +    private val totals = HashMap<String, Totals>()
 +    private var sampledAt: Long? = null
 +    fun sample(counters: List<Counter>, now: Long, available: Boolean): Sample {
 +        if (!available) return Sample(totals.toMap(), emptyMap(), false)
++        val currentSources = counters.mapTo(HashSet()) { it.source }
++        retired.addAll(previous.keys - currentSources)
++        previous.keys.retainAll(currentSources)
 +        val delta = HashMap<String, Totals>()
++        val unavailable = HashSet<String>()
 +        counters.forEach { current ->
 +            val old = previous.put(current.source, current)
-+            val sent = if (old == null || current.sent < old.sent) current.sent else current.sent - old.sent
-+            val received = if (old == null || current.received < old.received) current.received else current.received - old.received
++            val wasRetired = retired.remove(current.source)
++            val reset = old != null && (current.sent < old.sent || current.received < old.received)
++            val sent = if (old == null || wasRetired || reset) 0 else current.sent - old.sent
++            val received = if (old == null || wasRetired || reset) 0 else current.received - old.received
++            if (wasRetired || reset) unavailable.add(current.mac)
 +            val before = totals[current.mac] ?: Totals(0, 0)
 +            totals[current.mac] = Totals(before.sent + sent, before.received + received)
 +            val change = delta[current.mac] ?: Totals(0, 0)
@@ -165,8 +202,18 @@ index 0000000000000000000000000000000000000000..1270b4e196f44dbd69ff9447af2ce4de
 +            totals.mapValues { (mac, _) ->
 +                val change = delta[mac] ?: Totals(0, 0)
 +                Totals(change.sent * 1000 / elapsed, change.received * 1000 / elapsed)
-+            }, true)
++            }.filterKeys { it !in unavailable }, true)
 +    }
++}
++
++/** Immutable publication; expiration never changes the sampler baseline or retained totals. */
++internal data class DashboardTrafficSnapshot(
++    val sample: DashboardTraffic.Sample,
++    val at: Long,
++    val wallTime: Long,
++) {
++    fun current(now: Long): DashboardTraffic.Sample =
++        if (now - at <= 3000) sample else sample.copy(rates = emptyMap(), available = false)
 +}
 +
 +/** Neighbour entries are addresses, not separate clients or Wi-Fi associations. */
@@ -203,17 +250,18 @@ index ec1ab8599c737645404ba7dedc4822ec09baa82d..b89ce8b78f614bdcaeb2cff11f59d219
                      if (it == null) active.remove(downstream, this@RoutingManager)
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad8587c253f7
+index 0000000000000000000000000000000000000000..f3bf4f172a672981df0131f6a6ef787860d38be4
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,246 @@
 +package be.mygod.vpnhotspot
 +
 +import be.mygod.vpnhotspot.net.NetlinkNeighbour
 +import be.mygod.vpnhotspot.net.monitor.TrafficRecorder
 +import be.mygod.vpnhotspot.net.monitor.Upstream
 +import be.mygod.vpnhotspot.net.monitor.Upstreams
-+import be.mygod.vpnhotspot.room.TrafficRecord
++import be.mygod.vpnhotspot.root.daemon.DaemonController
++import kotlinx.coroutines.CancellationException
 +import be.mygod.vpnhotspot.widget.SmartSnackbar
 +import kotlinx.coroutines.CoroutineScope
 +import kotlinx.coroutines.CoroutineStart
@@ -240,16 +288,57 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 +    private val lifecycleLock = Any()
 +    private val sessions = HashMap<String, Session>()
-+    private data class RecorderSnapshot(val records: List<TrafficRecord>?, val at: Long, val wallTime: Long)
-+    private val recorderCache = DashboardCache<RecorderSnapshot>()
++    private data class Counter(val downstream: String, val traffic: DashboardTraffic.Counter)
++    private data class RecorderSnapshot(val records: List<Counter>, val at: Long, val wallTime: Long)
++    // Match the page's one-second refresh budget. Only this single process-wide owner reads
++    // counters; no recorder mutex or database operation is involved in dashboard sampling.
++    private val sampler = DashboardSampler(scope, 1000) {
++        val counters = DaemonController.readTrafficCounters().mapNotNull { counter ->
++            val key = TrafficRecorder.counterKey(counter) ?: return@mapNotNull null
++            Counter(key.downstream, DashboardTraffic.Counter(
++                "${key.mac}/${key.source.ip.hostAddress}/${key.source.upstream}", key.mac.toString(),
++                counter.sent_bytes, counter.received_bytes,
++            ))
++        }
++        RecorderSnapshot(counters, System.nanoTime() / 1_000_000, System.currentTimeMillis())
++    }
++    private val samplerJob = scope.launch(start = CoroutineStart.LAZY) {
++        while (true) {
++            val targets = synchronized(lifecycleLock) { sessions.toList() }
++            if (targets.isNotEmpty()) {
++                val snapshot = try {
++                    sampler.read()
++                } catch (e: CancellationException) {
++                    throw e
++                } catch (e: Exception) {
++                    Timber.w(e, "Dashboard traffic sample unavailable")
++                    null
++                }
++                targets.forEach { (iface, session) ->
++                    if (session.resources.active) session.cache.read {
++                        // A rapid routing restart must not seed the new session with a cached old-generation sample.
++                        val records = snapshot?.records?.takeIf { snapshot.at >= session.createdAt }
++                        DashboardTrafficSnapshot(session.traffic.sample(
++                            records.orEmpty().filter { it.downstream == iface }.map { it.traffic },
++                            snapshot?.at ?: System.nanoTime() / 1_000_000, records != null,
++                        ), snapshot?.at ?: System.nanoTime() / 1_000_000,
++                            snapshot?.wallTime ?: session.cache.peek()?.wallTime ?: 0)
++                    }
++                }
++            }
++            delay(1000)
++        }
++    }
 +    private class Session {
 +        val createdAt = System.nanoTime() / 1_000_000
 +        val resources = DashboardSession()
-+        val cache = DashboardCache<String>()
++        val cache = DashboardCache<DashboardTrafficSnapshot>()
 +        val traffic = DashboardTraffic()
 +        lateinit var job: Job
 +        @Volatile var gateway = ""
++        @Volatile var vpn: Upstream? = null
 +        @Volatile var neighbours: List<NetlinkNeighbour>? = null
++        @Volatile var neighboursAt = 0L
 +    }
 +
 +    fun start(iface: String) = synchronized(lifecycleLock) {
@@ -259,6 +348,7 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +        session.job = scope.launch(start = CoroutineStart.LAZY) { serve(iface, session) }
 +        sessions[iface] = session
 +        session.job.start()
++        samplerJob.start()
 +    }
 +
 +    fun stop(iface: String) = synchronized(lifecycleLock) {
@@ -270,9 +360,13 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +
 +    private suspend fun serve(iface: String, session: Session) {
 +        val connectionScope = CoroutineScope(currentCoroutineContext())
++        val vpnJob = connectionScope.launch {
++            Upstreams.vpn.collect { session.vpn = it }
++        }
 +        val neighbourJob = connectionScope.launch {
 +            NetlinkNeighbour.snapshots.collect { snapshot ->
 +                session.neighbours = snapshot.filter { it.dev == iface }
++                session.neighboursAt = System.nanoTime() / 1_000_000
 +            }
 +        }
 +        try {
@@ -315,6 +409,7 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +            }
 +        } finally {
 +            session.resources.stop()
++            vpnJob.cancel()
 +            neighbourJob.cancel()
 +            synchronized(lifecycleLock) {
 +                // Identity matters: a late finally never touches a replacement generation.
@@ -353,20 +448,14 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +        output.flush()
 +    }
 +
-+    private suspend fun status(iface: String, session: Session): String = session.cache.read {
-+        val snapshot = recorderCache.read {
-+            RecorderSnapshot(TrafficRecorder.dashboardSnapshot(), System.nanoTime() / 1_000_000,
-+                System.currentTimeMillis())
++    private fun status(iface: String, session: Session): String {
++        val snapshot = session.cache.peek()
++        val sample = snapshot?.current(System.nanoTime() / 1_000_000)
++            ?: DashboardTraffic.Sample(emptyMap(), emptyMap(), false)
++        val observed = session.neighbours.takeIf {
++            val at = session.neighboursAt
++            at != 0L && System.nanoTime() / 1_000_000 - at <= 3000
 +        }
-+        // A rapid routing restart must not seed the new session with a cached old-generation sample.
-+        val records = snapshot.records.takeIf { snapshot.at >= session.createdAt }
-+        val sample = session.traffic.sample(records.orEmpty().filter { it.downstream == iface }.map { record ->
-+            DashboardTraffic.Counter(
-+                "${record.mac}/${record.ip.hostAddress}/${record.upstream}", record.mac.toString(),
-+                record.sentBytes, record.receivedBytes,
-+            )
-+        }, snapshot.at, records != null)
-+        val observed = session.neighbours
 +        val clients = dashboardClients(observed.orEmpty().map {
 +            it.validClientMac?.toString() to it.ip.hostAddress.orEmpty()
 +        }).map { (mac, ips) ->
@@ -377,10 +466,11 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +                    "],\"sendBytesPerSecond\":${rate?.sent},\"receiveBytesPerSecond\":${rate?.received}," +
 +                    "\"sendBytes\":${total?.sent},\"receiveBytes\":${total?.received}}"
 +            }
-+        "{\"schema\":2,\"downstream\":${json(iface)},\"gateway\":${json(session.gateway)}," +
-+            "\"sampledAt\":${snapshot.wallTime},\"trafficAvailable\":${sample.available}," +
++        return "{\"schema\":2,\"downstream\":${json(iface)},\"gateway\":${json(session.gateway)}," +
++            "\"sampledAt\":${snapshot?.wallTime?.takeIf { it != 0L }},\"trafficAvailable\":${sample.available}," +
 +            "\"neighboursAvailable\":${observed != null},\"observedClientCount\":${clients.size}," +
-+            "\"clients\":[${clients.joinToString(",")}],\"primary\":${upstreamJson(Upstreams.primary.value)}," +
++            "\"clients\":[${clients.joinToString()}],\"vpn\":${upstreamJson(session.vpn)}," +
++            "\"primary\":${upstreamJson(Upstreams.primary.value)}," +
 +            "\"fallback\":${upstreamJson(Upstreams.fallback.value)}}"
 +    }
 +
@@ -407,74 +497,22 @@ index 0000000000000000000000000000000000000000..903e523a4ff39fe3d20647ca45a4ad85
 +        <h1>VPNHotspot</h1><p id=summary class=muted>loading...</p>
 +        <p class=muted>Observed neighbours are not a Wi-Fi association count. Primary/fallback availability does not prove per-client routing. Totals include recorded sources for this dashboard session; unavailable values show —.</p>
 +        <table><thead><tr><th>Observed client</th><th>IP addresses</th><th>↓ B/s</th><th>↑ B/s</th><th>Recorded session bytes</th></tr></thead><tbody id=clients></tbody></table>
-+        <script>const fmt=v=>v===null?'—':v;async function refresh(){try{const s=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json());summary.textContent=s.gateway+' · '+s.observedClientCount+' observed clients · primary '+(s.primary?'available':'unavailable')+' · fallback '+(s.fallback?'available':'unavailable')+(s.trafficAvailable?'':' · traffic unavailable (prior totals retained)')+(s.neighboursAvailable?'':' · neighbours unavailable');clients.textContent='';s.clients.forEach(c=>{const tr=document.createElement('tr');[c.mac,c.ips.join(', '),fmt(c.receiveBytesPerSecond),fmt(c.sendBytesPerSecond),c.receiveBytes===null||c.sendBytes===null?'—':c.receiveBytes+c.sendBytes].forEach(v=>{const td=document.createElement('td');td.textContent=v;tr.append(td)});clients.append(tr)})}catch(e){summary.textContent='status unavailable'}}refresh();setInterval(refresh,1000)</script>
++        <script>const fmt=v=>v===null?'—':v;async function refresh(){try{const s=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json());summary.textContent=s.gateway+' · '+s.observedClientCount+' observed clients · VPN '+(s.vpn?'connected':'unavailable')+' · primary '+(s.primary?'available':'unavailable')+' · fallback '+(s.fallback?'available':'unavailable')+(s.trafficAvailable?'':' · traffic unavailable (prior totals retained)')+(s.neighboursAvailable?'':' · neighbours unavailable');clients.textContent='';s.clients.forEach(c=>{const tr=document.createElement('tr');[c.mac,c.ips.join(', '),fmt(c.receiveBytesPerSecond),fmt(c.sendBytesPerSecond),c.receiveBytes===null||c.sendBytes===null?'—':c.receiveBytes+c.sendBytes].forEach(v=>{const td=document.createElement('td');td.textContent=v;tr.append(td)});clients.append(tr)})}catch(e){summary.textContent='status unavailable'}}refresh();setInterval(refresh,1000)</script>
 +    """.trimIndent()
 +}
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
-index 22a174cb4c87568575693062bfd0784fc9b08a8d..aa0e8a4810156618f5114bcaed88309af6e2996f 100644
+index 22a174cb4c87568575693062bfd0784fc9b08a8d..8676c6e53bb2a28413c6d9112d2cffb73aeb025c 100644
 --- a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
-@@ -115,12 +115,22 @@ object TrafficRecorder {
-         scheduleUpdateLocked()
-     }
- 
-+    /** A failed/partial daemon read must not become a plausible zero on the dashboard. */
-+    suspend fun dashboardSnapshot(): List<TrafficRecord>? = updateMutex.withLock {
-+        if (!updateLocked()) null else buildList(records.size) { records.forEachValue { add(it.copy()) } }
-+    }
-+
-     suspend fun update() = updateMutex.withLock { updateLocked() }
--    private suspend fun updateLocked() {
-+    private suspend fun updateLocked(): Boolean {
-         if (updateJob === currentCoroutineContext()[Job]) updateJob = null else unscheduleUpdateLocked()
--        if (records.isEmpty() && activeClients.isEmpty()) return
-+        if (records.isEmpty() && activeClients.isEmpty()) return true
-+        var complete = true
-         try {
-             val counters = DaemonController.readTrafficCounters()
-+            if (counters.isEmpty()) {
-+                scheduleUpdateLocked()
-+                return false
-+            }
-             val timestamp = System.currentTimeMillis()
-             lastUpdate = timestamp
-             val oldRecords = MutableLongObjectMap<TrafficRecord>()
-@@ -128,6 +138,7 @@ object TrafficRecorder {
-             loop@ for (counter in counters) {
-                 try {
-                     val key = counterKey(counter) ?: run {
-+                        complete = false
-                         Timber.w("Ignoring unsupported traffic counter source: $counter")
-                         continue@loop
-                     }
-@@ -171,7 +182,10 @@ object TrafficRecorder {
+@@ -171,6 +171,8 @@ object TrafficRecorder {
                          check(records.put(key, record) == oldRecord)
                          oldRecords[oldId] = oldRecord
                      }
 +                } catch (e: CancellationException) {
 +                    throw e
                  } catch (e: Exception) {
-+                    complete = false
                      Timber.w(counter.toString())
                      Timber.w(e)
-                 }
-@@ -188,12 +202,15 @@ object TrafficRecorder {
-             val newRecords = MutableObjectList<TrafficRecord>(records.size)
-             records.forEachValue { newRecords.add(it) }
-             foregroundUpdatesState.tryEmit(ForegroundUpdate(newRecords, oldRecords))
--        } catch (_: CancellationException) {
-+        } catch (e: CancellationException) {
-+            throw e
-         } catch (e: Exception) {
-+            complete = false
-             Timber.w(e)
-             SmartSnackbar.make(e).show()
-         }
-         if (records.isNotEmpty() || activeClients.isNotEmpty()) scheduleUpdateLocked()
-+        return complete
-     }
- 
-     suspend fun clean() = updateMutex.withLock {
 diff --git a/mobile/src/main/rust/vpnhotspotd/src/dns.rs b/mobile/src/main/rust/vpnhotspotd/src/dns.rs
 index f91ef2ff5be38e1d4614d4afa698a159c22d5648..2af4ddcfcc407f3416ca561c916515392b102ded 100644
 --- a/mobile/src/main/rust/vpnhotspotd/src/dns.rs
