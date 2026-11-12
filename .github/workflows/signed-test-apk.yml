@@ -38,7 +38,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 maintenance/scripts/signed-test/signed_test.py prepare
-      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '17'
@@ -115,7 +115,7 @@ jobs:
           set -eu
           case "$ARTIFACT_ID" in ''|*[!0-9]*) exit 1 ;; esac
           gh api --method DELETE "repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID"
-      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '17'
