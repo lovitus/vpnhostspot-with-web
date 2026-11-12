@@ -41,7 +41,7 @@ def verify_source_tree(source, info_path):
     submodule_state = run('git', 'submodule', 'status', '--recursive', cwd=source)
     if any(line[:1] in '-+U' for line in submodule_state.splitlines()):
         raise ValueError('A source submodule is not at its recorded clean commit')
-    submodule_changes = run('git', 'submodule', 'foreach', '--recursive',
+    submodule_changes = run('git', 'submodule', 'foreach', '--quiet', '--recursive',
                             'git status --porcelain --untracked-files=all', cwd=source)
     if submodule_changes:
         raise ValueError('Build changed a source submodule')

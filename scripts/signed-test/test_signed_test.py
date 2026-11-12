@@ -95,6 +95,38 @@ class SignedTestTests(unittest.TestCase):
                     m.verify_source_tree(root, info)
             self.assertEqual(run.call_args_list[0].args[:2], ('git', 'write-tree'))
 
+    def test_real_clean_submodule_and_dirty_submodule(self):
+        import json
+        import subprocess
+        m = module()
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            child, source = root / 'child', root / 'source'
+            def git(cwd, *args):
+                return subprocess.check_output(
+                    ['git', '-c', 'user.name=CI Test', '-c', 'user.email=ci@example.invalid',
+                     '-c', 'protocol.file.allow=always', *args], cwd=cwd, text=True).strip()
+            for repo in (child, source):
+                repo.mkdir()
+                git(repo, 'init', '--quiet')
+                (repo / 'tracked').write_text('initial\n', encoding='utf-8')
+                git(repo, 'add', 'tracked')
+                git(repo, 'commit', '--quiet', '-m', 'fixture')
+            git(source, 'submodule', 'add', '--quiet', str(child), 'module')
+            git(source, 'commit', '--quiet', '-am', 'submodule')
+            (source / 'tracked').write_text('intended staged patch\n', encoding='utf-8')
+            git(source, 'add', 'tracked')
+            info = root / 'info.json'
+            info.write_text(json.dumps({'patched_tree': git(source, 'write-tree')}), encoding='utf-8')
+            m.verify_source_tree(source, info)
+            (source / 'module' / 'untracked').write_text('unexpected', encoding='utf-8')
+            with self.assertRaises(ValueError):
+                m.verify_source_tree(source, info)
+            (source / 'module' / 'untracked').unlink()
+            (source / 'module' / 'tracked').write_text('modified', encoding='utf-8')
+            with self.assertRaises(ValueError):
+                m.verify_source_tree(source, info)
+
     def test_source_tree_rejects_index_worktree_or_submodule_changes(self):
         m = module()
         with tempfile.TemporaryDirectory() as d:
