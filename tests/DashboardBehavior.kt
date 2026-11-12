@@ -31,6 +31,10 @@ fun main() = runBlocking {
         check(request("GET /${"a".repeat(4096)} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n") == null)
         check(request("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n" + "X: a\r\n".repeat(65) + "\r\n") == null)
         check(request("GET http://evil.example/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n") == null)
+        check(request("GET / HTTP/1.1\r\nHost: vpnhotspot.lan:8080\r\n\r\n") != null)
+        for (port in listOf("80", "8081", "garbage", "8080:80", "08080", "")) {
+            check(request("GET / HTTP/1.1\r\nHost: vpnhotspot.lan:$port\r\n\r\n") == null) { "unexpected Host port accepted: $port" }
+        }
         println("PASS bounded HTTP parser and exact Host validation")
     }
     if (mode == "all" || mode == "lifecycle") {

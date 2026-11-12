@@ -82,9 +82,9 @@ class DashboardWiringTest(unittest.TestCase):
         self.assertEqual(self.web.count("DaemonController.readTrafficCounters()"), 1)
         self.assertIn("samplerJob.start()", self.web)
 
-    def test_dashboard_reports_vpn_separately_and_expires_neighbours(self):
+    def test_dashboard_retains_event_driven_neighbours(self):
         self.assertIn("Upstreams.vpn.collect", self.web)
-        self.assertIn("neighboursAt", self.web)
-        self.assertIn("<= 3000", self.web)
+        status = self.web[self.web.index("private fun status("):self.web.index("private fun upstreamJson")]
+        self.assertNotIn("<= 3000", status, "stable neighbours must not expire without a removal or monitor invalidation")
 
 

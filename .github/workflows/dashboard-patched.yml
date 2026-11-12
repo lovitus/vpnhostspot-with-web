@@ -2,7 +2,7 @@ name: Dashboard patched source
 
 on:
   push:
-    branches: [master, agent/web-review-fixes, agent/web-lock-fix, agent/integrated-final]
+    branches: [master, agent/web-review-fixes, agent/web-lock-fix, agent/integrated-final, agent/dashboard-complete]
   workflow_dispatch:
 
 permissions:
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   verify:
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/agent/web-review-fixes' || github.ref == 'refs/heads/agent/web-lock-fix' || github.ref == 'refs/heads/agent/integrated-final'
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/agent/web-review-fixes' || github.ref == 'refs/heads/agent/web-lock-fix' || github.ref == 'refs/heads/agent/integrated-final' || github.ref == 'refs/heads/agent/dashboard-complete'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
