@@ -122,7 +122,8 @@ index 0000000000000000000000000000000000000000..7e95d9e822e6f0a8c0a1107a5d9763d0
 +                name.equals("Content-Length", true) && header.substringAfter(':').trim() != "0") return null
 +        }
 +        val allowed = setOf(socket.localAddress.hostAddress, "vpnhotspot.lan")
-+        if (host !in allowed && host?.removeSuffix(":80") !in allowed) return null
++        val hostWithoutPort = host?.substringBeforeLast(':')
++        if (host !in allowed && hostWithoutPort !in allowed) return null
 +        return Request(parts[0], parts[1].substringBefore('?'))
 +    }
 +}
@@ -283,7 +284,7 @@ index 0000000000000000000000000000000000000000..f3bf4f172a672981df0131f6a6ef7878
 +
 +/** Read-only HTTP in the unprivileged app process; no routing or root authority. */
 +object WebAdmin {
-+    private const val PORT = 80
++    private const val PORT = 8080
 +    private const val REQUEST_DEADLINE_MS = 3000L
 +    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 +    private val lifecycleLock = Any()
@@ -397,13 +398,13 @@ index 0000000000000000000000000000000000000000..f3bf4f172a672981df0131f6a6ef7878
 +                    }
 +                } catch (e: IOException) {
 +                    if (session.resources.active) {
-+                        Timber.e(e, "Dashboard unavailable on %s:80", address.hostAddress)
-+                        SmartSnackbar.make("Dashboard unavailable on ${address.hostAddress}:80: ${e.message}").show()
++                        Timber.e(e, "Dashboard unavailable on %s:8080", address.hostAddress)
++                        SmartSnackbar.make("Dashboard unavailable on ${address.hostAddress}:8080: ${e.message}").show()
 +                    }
 +                    return
 +                } catch (e: SecurityException) {
-+                    Timber.e(e, "Dashboard bind denied on %s:80", address.hostAddress)
-+                    SmartSnackbar.make("Dashboard bind denied on ${address.hostAddress}:80").show()
++                    Timber.e(e, "Dashboard bind denied on %s:8080", address.hostAddress)
++                    SmartSnackbar.make("Dashboard bind denied on ${address.hostAddress}:8080").show()
 +                    return
 +                }
 +            }
