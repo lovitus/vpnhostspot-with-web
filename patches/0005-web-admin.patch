@@ -29,7 +29,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..7e95d9e822e6f0a8c0a1107a5d9763d05275c5a3
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,193 @@
 +package be.mygod.vpnhotspot
 +
 +import java.io.ByteArrayOutputStream
@@ -220,7 +220,9 @@ index 0000000000000000000000000000000000000000..7e95d9e822e6f0a8c0a1107a5d9763d0
 +/** Neighbour entries are addresses, not separate clients or Wi-Fi associations. */
 +internal fun dashboardClients(addresses: List<Pair<String?, String>>): Map<String, List<String>> =
 +    addresses.mapNotNull { (mac, ip) -> mac?.let { it to ip } }
-+        .groupBy({ it.first }, { it.second }).toSortedMap().mapValues { (_, ips) -> ips.distinct().sorted() }
++        .groupBy { it.first }
++        .mapValues { (_, pairs) -> pairs.map { it.second }.distinct().sorted() }
++        .toSortedMap()
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/RoutingManager.kt b/mobile/src/main/java/be/mygod/vpnhotspot/RoutingManager.kt
 index ec1ab8599c737645404ba7dedc4822ec09baa82d..b89ce8b78f614bdcaeb2cff11f59d219054f1c5b 100644
 --- a/mobile/src/main/java/be/mygod/vpnhotspot/RoutingManager.kt
