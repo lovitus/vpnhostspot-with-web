@@ -33,6 +33,12 @@ invalidation, accepts explicit removals from the next valid table, and starts a
 replacement session without old-generation data. No heartbeat or longer TTL is
 invented.
 
+The shared monitor publishes availability on `monitorObservations`; the existing
+`monitorSnapshots` is its available-table-only projection. Existing routing,
+notifications and Android UI consumers therefore never receive an invalidation
+as a fabricated empty table. Both projections share the original single daemon
+monitor and delta fold. The dashboard consumes the availability-aware projection.
+
 Hosted verification preserves the existing HTTP, deadline, lifecycle, cache,
 traffic reset/source-churn, Android JVM, and DNS tests. Added JVM coverage uses
 the actual production cache, sampler, snapshot expiration, and HTTP parser with

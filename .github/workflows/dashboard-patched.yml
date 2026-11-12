@@ -15,7 +15,7 @@ concurrency:
 jobs:
   verify:
     if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/agent/web-review-fixes' || github.ref == 'refs/heads/agent/web-lock-fix' || github.ref == 'refs/heads/agent/integrated-final' || github.ref == 'refs/heads/agent/dashboard-complete'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7

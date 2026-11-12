@@ -397,10 +397,10 @@ index ec1ab859..b89ce8b7 100644
                      if (it == null) active.remove(downstream, this@RoutingManager)
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
 new file mode 100644
-index 00000000..f19744ad
+index 00000000..9037fe9d
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,385 @@
 +package be.mygod.vpnhotspot
 +
 +import android.net.MacAddress
@@ -419,7 +419,7 @@ index 00000000..f19744ad
 +import kotlinx.coroutines.flow.MutableStateFlow
 +import kotlinx.coroutines.flow.collectLatest
 +import kotlinx.coroutines.flow.combine
-+import kotlinx.coroutines.flow.filter
++import kotlinx.coroutines.flow.map
 +import be.mygod.vpnhotspot.net.NetlinkNeighbour
 +import be.mygod.vpnhotspot.net.TetherType
 +import be.mygod.vpnhotspot.net.monitor.TrafficRecorder
@@ -557,7 +557,7 @@ index 00000000..f19744ad
 +        val primaryJob = connectionScope.launch { Upstreams.primary.collect { session.primary = upstreamJson(it) } }
 +        val fallbackJob = connectionScope.launch { Upstreams.fallback.collect { session.fallback = upstreamJson(it) } }
 +        val neighbourJob = connectionScope.launch {
-+            NetlinkNeighbour.monitorSnapshots.collect { snapshot ->
++            NetlinkNeighbour.monitorObservations.collect { snapshot ->
 +                if (snapshot.available) session.neighbours.update(snapshot, System.currentTimeMillis()) else {
 +                    session.neighbours.invalidate()
 +                    snapshot.unavailableReason?.let { session.error("neighbours", it) }
@@ -567,7 +567,9 @@ index 00000000..f19744ad
 +        val namesJob = connectionScope.launch {
 +            try {
 +                // Same saved records as ClientViewModel; no Activity or database work in HTTP.
-+                combine(NetlinkNeighbour.monitorSnapshots.filter { it.available }, p2p) { snapshot, association ->
++                combine(NetlinkNeighbour.monitorObservations.map {
++                    if (it.available) it else session.neighbours.peek().value ?: it
++                }, p2p) { snapshot, association ->
 +                    snapshot.neighbours.filter {
 +                        (snapshot.bridgeMasterByMember[it.dev] ?: it.dev) == iface
 +                    }.mapNotNull { it.lladdr }.toSet() +
@@ -785,10 +787,14 @@ index 00000000..f19744ad
 +
 +}
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/net/NetlinkNeighbour.kt b/mobile/src/main/java/be/mygod/vpnhotspot/net/NetlinkNeighbour.kt
-index 9b3d975a..6830d7a6 100644
+index 9b3d975a..e152a87d 100644
 --- a/mobile/src/main/java/be/mygod/vpnhotspot/net/NetlinkNeighbour.kt
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/net/NetlinkNeighbour.kt
-@@ -20,6 +20,8 @@ import kotlinx.coroutines.flow.drop
+@@ -17,9 +17,12 @@ import kotlinx.coroutines.flow.SharingStarted
+ import kotlinx.coroutines.flow.catch
+ import kotlinx.coroutines.flow.distinctUntilChanged
+ import kotlinx.coroutines.flow.drop
++import kotlinx.coroutines.flow.filter
  import kotlinx.coroutines.flow.map
  import kotlinx.coroutines.flow.runningFold
  import kotlinx.coroutines.flow.shareIn
@@ -797,7 +803,7 @@ index 9b3d975a..6830d7a6 100644
  import timber.log.Timber
  import okio.ByteString
  import java.io.IOException
-@@ -41,6 +43,9 @@ data class NetlinkNeighbour(val proto: Neighbour) {
+@@ -41,6 +44,9 @@ data class NetlinkNeighbour(val proto: Neighbour) {
      data class Snapshot(
          val neighbours: Collection<NetlinkNeighbour> = emptyList(),
          val bridgeMasterByMember: PersistentMap<String, String> = persistentMapOf(),
@@ -807,7 +813,16 @@ index 9b3d975a..6830d7a6 100644
      )
  
      companion object {
-@@ -82,8 +87,12 @@ data class NetlinkNeighbour(val proto: Neighbour) {
+@@ -56,7 +62,7 @@ data class NetlinkNeighbour(val proto: Neighbour) {
+             }
+         }
+ 
+-        val monitorSnapshots = DaemonController.neighbourMonitor().runningFold(MonitorState()) { state, update ->
++        internal val monitorObservations = DaemonController.neighbourMonitor().runningFold(MonitorState()) { state, update ->
+             state.copy(
+                 neighbours = state.neighbours.mutate {
+                     for (delta in update.neighbour_deltas) {
+@@ -82,8 +88,12 @@ data class NetlinkNeighbour(val proto: Neighbour) {
                      }
                  } ?: state.bridgeMasterByMember,
              )
@@ -821,6 +836,16 @@ index 9b3d975a..6830d7a6 100644
              Timber.w(e)
              SmartSnackbar.make(e).show()
          }.shareIn(
+@@ -92,6 +102,9 @@ data class NetlinkNeighbour(val proto: Neighbour) {
+             replay = 1,
+         )
+ 
++        // Existing routing/UI subscribers keep their original table-only semantics. Lifecycle
++        // observations must never masquerade as an empty neighbour table and remove routed clients.
++        val monitorSnapshots = monitorObservations.filter { it.available }
+         val snapshots = monitorSnapshots.map { it.neighbours }.distinctUntilChanged()
+     }
+ }
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
 index 22a174cb..8676c6e5 100644
 --- a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt

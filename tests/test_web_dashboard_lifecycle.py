@@ -87,7 +87,7 @@ class DashboardWiringTest(unittest.TestCase):
         status = self.web[self.web.index("private fun status("):self.web.index("private fun upstreamJson")]
         self.assertNotIn("<= 3000", status, "stable neighbours must not expire without a removal or monitor invalidation")
         self.assertIn("session.neighbours.peek()", status)
-        self.assertIn("NetlinkNeighbour.monitorSnapshots.collect", self.web)
+        self.assertIn("NetlinkNeighbour.monitorObservations.collect", self.web)
         self.assertIn("snapshot.available", self.web)
         self.assertIn("session.neighbours.invalidate()", self.web)
         self.assertIn("session.neighbours.update(snapshot", self.web)
@@ -108,5 +108,7 @@ class DashboardWiringTest(unittest.TestCase):
         self.assertIn(".onStart { emit(Snapshot(available = false)) }", monitor)
         self.assertIn(".onCompletion", monitor)
         self.assertIn("unavailableReason = e.toString()", monitor)
+        self.assertIn("val monitorSnapshots = monitorObservations.filter { it.available }", monitor,
+                      "observation invalidation must not remove clients from existing routing subscribers")
 
 
