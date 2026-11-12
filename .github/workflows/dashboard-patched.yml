@@ -47,7 +47,17 @@ jobs:
         working-directory: patched
         run: ./gradlew :mobile:compileDebugKotlin :mobile:testDebugUnitTest --no-daemon --console=plain
       - name: Execute production Kotlin behavior tests
+        env:
+          DASHBOARD_PAGE_OUTPUT: ${{ runner.temp }}/dashboard.html
         run: python3 tests/run_dashboard_behavior.py "$GITHUB_WORKSPACE/patched"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Exercise compiled production page in Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/dashboard-browser" playwright@1.56.1
+          "$RUNNER_TEMP/dashboard-browser/node_modules/.bin/playwright" install --with-deps chromium
+          NODE_PATH="$RUNNER_TEMP/dashboard-browser/node_modules" node tests/dashboard_browser.cjs "$RUNNER_TEMP/dashboard.html" "$RUNNER_TEMP"
       - name: Check Android lifecycle wiring
         env:
           VPNHOTSPOT_SOURCE: ${{ github.workspace }}/patched
@@ -72,4 +82,7 @@ jobs:
             patches/0005-web-admin.patch
             patched/mobile/build/reports/tests/
             patched/mobile/build/test-results/
+            ${{ runner.temp }}/dashboard.html
+            ${{ runner.temp }}/dashboard-desktop.png
+            ${{ runner.temp }}/dashboard-mobile.png
           if-no-files-found: warn

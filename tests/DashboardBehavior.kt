@@ -18,6 +18,7 @@ private fun request(raw: String): DashboardHttp.Request? = ServerSocket(0, 1, In
 }
 
 fun main() = runBlocking {
+    System.getProperty("dashboard.page.path")?.takeIf { it.isNotEmpty() }?.let { java.io.File(it).writeText(DASHBOARD_PAGE) }
     val mode = System.getProperty("test", "all")
     if (mode == "all" || mode == "http") {
         check(request("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")?.path == "/api/status")
@@ -202,6 +203,26 @@ fun main() = runBlocking {
         check(snapshot.current(1000) == fresh) // reading does not mutate the published sample
         println("PASS stale traffic suppresses rates and retains immutable totals")
     }
+    if (mode == "all" || mode == "neighbours") {
+        val observed = DashboardObservation<List<Pair<String?, String>>>()
+        check(observed.peek().value == null && !observed.peek().available)
+        observed.update(listOf("mac" to "192.168.49.157", "mac" to "fe80::157"), 1000)
+        delay(3100) // real silent interval beyond the former 3-second expiry
+        val stable = observed.peek()
+        check(stable.available && dashboardClients(stable.value!!).size == 1)
+        check(stable.changedAt == 1000L)
+        observed.update(emptyList(), 5000) // explicit deletion, not a timer
+        check(observed.peek().available && observed.peek().value!!.isEmpty())
+        observed.update(listOf("mac" to "192.168.49.157"), 6000)
+        observed.invalidate()
+        check(!observed.peek().available && observed.peek().value!!.isNotEmpty()) // clearly stale last-known state
+        val restarted = DashboardObservation<List<Pair<String?, String>>>()
+        check(restarted.peek().value == null && !restarted.peek().available)
+        restarted.update(emptyList(), 7000)
+        check(restarted.peek().available && restarted.peek().value!!.isEmpty())
+        check(!observed.peek().available) // old generation cannot populate its replacement
+        println("PASS silent neighbours survive >3 seconds; deletion, invalidation and restart")
+    }
     if (mode == "all" || mode == "traffic") {
         val samples = DashboardTraffic()
         val a = DashboardTraffic.Counter("a", "mac", 100, 200)
@@ -211,8 +232,14 @@ fun main() = runBlocking {
         check(first.rates["mac"] == null)
         val next = samples.sample(listOf(a.copy(sent = 200, received = 400), b), 1000, true)
         check(next.rates.getValue("mac").sent == 100L)
+        check(next.lastChange["mac"] == 1000L)
+        check(dashboardTrafficSummary(next)["sendBytesPerSecond"] == 100L)
+        check(dashboardTrafficSummary(first)["sendBytesPerSecond"] == null)
         val failed = samples.sample(emptyList(), 2000, false)
         check(!failed.available && failed.totals == next.totals && failed.rates.isEmpty())
+        check(failed.lastChange == next.lastChange)
+        check(dashboardTrafficSummary(failed)["sendBytes"] == 100L)
+        check(dashboardTrafficSummary(failed)["sendBytesPerSecond"] == null)
         val recovered = samples.sample(listOf(b.copy(sent = 180, received = 300)), 3000, true)
         check(recovered.totals.getValue("mac").sent == 230L) // a source disappearance preserves totals
         check(recovered.rates.getValue("mac").sent == 65L)
@@ -225,5 +252,9 @@ fun main() = runBlocking {
         check(clients.size == 2 && clients.getValue("mac") == listOf("192.168.1.2", "fe80::2"))
         check(dashboardClients(emptyList()).isEmpty())
         println("PASS one observed MAC with distinct IPv4/IPv6 addresses")
+        check(dashboardJson(mapOf("name" to "设备\n\"<script>\\", "unknown" to null, "list" to listOf(1, true))) ==
+            "{\"name\":\"设备\\u000a\\\"<script>\\\\\",\"unknown\":null,\"list\":[1,true]}")
+        check(dashboardTrafficSummary(DashboardTraffic.Sample(emptyMap(), emptyMap(), true)).values.all { it == null })
+        println("PASS production JSON escaping, unknown fields and aggregate availability")
     }
 }

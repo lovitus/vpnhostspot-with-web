@@ -86,5 +86,27 @@ class DashboardWiringTest(unittest.TestCase):
         self.assertIn("Upstreams.vpn.collect", self.web)
         status = self.web[self.web.index("private fun status("):self.web.index("private fun upstreamJson")]
         self.assertNotIn("<= 3000", status, "stable neighbours must not expire without a removal or monitor invalidation")
+        self.assertIn("session.neighbours.peek()", status)
+        self.assertIn("NetlinkNeighbour.monitorSnapshots.collect", self.web)
+        self.assertIn("snapshot.available", self.web)
+        self.assertIn("session.neighbours.invalidate()", self.web)
+        self.assertIn("session.neighbours.update(snapshot", self.web)
+
+    def test_client_identity_uses_existing_sources_off_http(self):
+        self.assertIn("Client(MacAddress.fromString(mac), iface, type)", self.web)
+        self.assertIn("lookupOrDefaultFlow(mac)", self.web)
+        self.assertIn("snapshot.bridgeMasterByMember", self.web)
+        self.assertIn("WebAdmin.observeP2pGroup(value)", (Path(os.environ['VPNHOTSPOT_SOURCE']) /
+            'mobile/src/main/java/be/mygod/vpnhotspot/RepeaterService.kt').read_text())
+        status = self.web[self.web.index("private fun status("):self.web.index("private fun upstreamJson")]
+        self.assertNotIn("AppDatabase", status)
+        self.assertNotIn("Services.connectivity", status)
+
+    def test_monitor_has_explicit_lifecycle_invalidation(self):
+        monitor = (Path(os.environ['VPNHOTSPOT_SOURCE']) /
+            'mobile/src/main/java/be/mygod/vpnhotspot/net/NetlinkNeighbour.kt').read_text()
+        self.assertIn(".onStart { emit(Snapshot(available = false)) }", monitor)
+        self.assertIn(".onCompletion", monitor)
+        self.assertIn("unavailableReason = e.toString()", monitor)
 
 

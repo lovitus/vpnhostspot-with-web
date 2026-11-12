@@ -11,6 +11,8 @@ import tempfile
 
 source = Path(sys.argv[1]).resolve()
 core = source / 'mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt'
+presentation = core.with_name('DashboardPresentation.kt')
+page = core.with_name('DashboardPage.kt')
 if not core.exists():
     raise SystemExit('FAIL: production DashboardCore.kt is missing (required tested boundary)')
 candidates = [Path(os.environ['KOTLIN_LIB'])] if os.environ.get('KOTLIN_LIB') else []
@@ -27,7 +29,8 @@ scratch = Path.home() / 'AppData/Local/hermes/cache/scratch' if os.name == 'nt' 
 scratch.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='dashboard-jvm-', dir=scratch) as out:
     subprocess.run([java, '-cp', str(lib / '*'), 'org.jetbrains.kotlin.cli.jvm.K2JVMCompiler',
-                    '-no-stdlib', '-no-reflect', '-classpath', cp, '-d', out, str(core),
+                    '-no-stdlib', '-no-reflect', '-classpath', cp, '-d', out, str(core), str(presentation), str(page),
                     str(Path(__file__).with_name('DashboardBehavior.kt'))], check=True)
-    subprocess.run([java, '-Dtest=' + (sys.argv[2] if len(sys.argv) > 2 else 'all'), '-cp',
+    subprocess.run([java, '-Dtest=' + (sys.argv[2] if len(sys.argv) > 2 else 'all'),
+                    '-Ddashboard.page.path=' + os.environ.get('DASHBOARD_PAGE_OUTPUT', ''), '-cp',
                     os.pathsep.join([out, cp]), 'be.mygod.vpnhotspot.DashboardBehaviorKt'], check=True)
