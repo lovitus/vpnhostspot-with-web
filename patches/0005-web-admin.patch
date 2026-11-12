@@ -1,362 +1,6 @@
-diff --git a/docs/vpnhotspotd/dns.md b/docs/vpnhotspotd/dns.md
-index f7218955..527809e4 100644
---- a/docs/vpnhotspotd/dns.md
-+++ b/docs/vpnhotspotd/dns.md
-@@ -45,6 +45,21 @@ by actual upstream interface.
- 
- ## Resolver Handoff
- 
-+Before resolver selection, one ordinary IN question for the exact name
-+`vpnhotspot.lan` (case insensitive) is answered locally. A queries receive the
-+actual downstream IPv4 gateway selected by the existing netlink address query,
-+with a five-second TTL. Other types receive NODATA. Gateway absence, ambiguity,
-+or a five-second address lookup timeout yields SERVFAIL; unexpected netlink
-+errors are reported as `dns.dashboard_gateway`. Unrelated names retain the
-+existing upstream/fallback resolver path. Local replies do not increase upstream
-+DNS counters and work without an available upstream.
-+
-+This adds no listener, address, route, firewall rule, or persistent root state.
-+The per-query netlink connection is dropped after lookup; normal stop/Clean and
-+process death keep the existing DNS listener cleanup behavior. HTTP stays in
-+the unprivileged app process. Clients bypassing this DNS handler must use the
-+numeric downstream gateway URL.
-+
- DNS queries are sent through bionic's Android resolver API:
- 
- - `android_res_nsend` starts a one-shot query on the selected Android network;
-diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt
-new file mode 100644
-index 00000000..5e6899cc
---- /dev/null
-+++ b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt
-@@ -0,0 +1,166 @@
-+package be.mygod.vpnhotspot
-+
-+import java.io.ByteArrayOutputStream
-+import java.net.ServerSocket
-+import java.net.Socket
-+import java.util.concurrent.ScheduledThreadPoolExecutor
-+import java.util.concurrent.TimeUnit
-+
-+/** Resources belong to one generation. Publication and shutdown share this object's monitor. */
-+internal class DashboardSession {
-+    @Volatile var active = true
-+        private set
-+    private var listener: ServerSocket? = null
-+    private val sockets = HashSet<Socket>()
-+
-+    @Synchronized fun publish(candidate: ServerSocket): Boolean {
-+        if (!active) { candidate.close(); return false }
-+        listener = candidate
-+        return true
-+    }
-+    @Synchronized fun attach(socket: Socket): Boolean {
-+        // At most 16 accepted requests per downstream; rejected sockets never acquire a worker.
-+        if (!active || sockets.size >= 16) { socket.close(); return false }
-+        sockets.add(socket)
-+        return true
-+    }
-+    @Synchronized fun detach(socket: Socket) { sockets.remove(socket) }
-+    @Synchronized fun stop() {
-+        active = false
-+        listener?.close()
-+        listener = null
-+        sockets.forEach { it.close() }
-+        sockets.clear()
-+    }
-+}
-+
-+/** SO_TIMEOUT only bounds reads. Closing the socket also interrupts a blocked response write. */
-+internal object DashboardDeadline {
-+    private val timer = ScheduledThreadPoolExecutor(1) { runnable ->
-+        Thread(runnable, "dashboard-deadlines").apply { isDaemon = true }
-+    }.apply { removeOnCancelPolicy = true }
-+    fun arm(socket: Socket, milliseconds: Long) = timer.schedule({ socket.close() }, milliseconds, TimeUnit.MILLISECONDS)
-+}
-+
-+internal object DashboardHttp {
-+    private const val MAX_LINE = 4096
-+    private const val MAX_HEADERS = 64
-+    data class Request(val method: String, val path: String)
-+
-+    fun read(socket: Socket, deadlineNanos: Long): Request? {
-+        val input = socket.getInputStream()
-+        fun line(): String? {
-+            val bytes = ByteArrayOutputStream()
-+            while (true) {
-+                val remaining = deadlineNanos - System.nanoTime()
-+                if (remaining <= 0) return null
-+                socket.soTimeout = (remaining / 1_000_000).coerceIn(1, Int.MAX_VALUE.toLong()).toInt()
-+                val value = input.read()
-+                if (value < 0) return null // EOF cannot complete a request/header line
-+                if (value == 10) {
-+                    val text = bytes.toString(Charsets.US_ASCII.name())
-+                    return if (text.endsWith('\r')) text.dropLast(1) else null
-+                }
-+                if (bytes.size() >= MAX_LINE || value > 127 || value == 0) return null
-+                bytes.write(value)
-+            }
-+        }
-+        val parts = (line() ?: return null).split(' ')
-+        if (parts.size != 3 || parts[2] != "HTTP/1.1" || !parts[1].startsWith('/') ||
-+            parts[1].startsWith("//")) return null
-+        var host: String? = null
-+        var count = 0
-+        while (true) {
-+            val header = line() ?: return null
-+            if (header.isEmpty()) break
-+            if (++count > MAX_HEADERS || header[0].isWhitespace() || ':' !in header) return null
-+            val name = header.substringBefore(':')
-+            if (name.equals("Host", true)) {
-+                if (host != null) return null
-+                host = header.substringAfter(':').trim()
-+            }
-+            // No request bodies or pipelining; close after the single response.
-+            if (name.equals("Transfer-Encoding", true) ||
-+                name.equals("Content-Length", true) && header.substringAfter(':').trim() != "0") return null
-+        }
-+        val allowed = setOf(socket.localAddress.hostAddress, "vpnhotspot.lan")
-+        // This listener is advertised on 8080. Never accept an arbitrary suffix as a port.
-+        if (allowed.none { host.equals(it, true) || host.equals("$it:8080", true) }) return null
-+        return Request(parts[0], parts[1].substringBefore('?'))
-+    }
-+}
-+
-+/** Accumulate deltas by recorder source, preserving completed sources for this dashboard session. */
-+internal class DashboardTraffic {
-+    data class Counter(val source: String, val mac: String, val sent: Long, val received: Long)
-+    data class Totals(val sent: Long, val received: Long)
-+    data class Sample(val totals: Map<String, Totals>, val rates: Map<String, Totals>, val available: Boolean,
-+                      val lastChange: Map<String, Long> = emptyMap(), val rateWindowMillis: Long? = null)
-+    private val previous = HashMap<String, Counter>()
-+    private val retired = HashSet<String>()
-+    private val totals = HashMap<String, Totals>()
-+    private val lastChange = HashMap<String, Long>()
-+    private var sampledAt: Long? = null
-+    fun sample(counters: List<Counter>, now: Long, available: Boolean): Sample {
-+        if (!available) return Sample(totals.toMap(), emptyMap(), false, lastChange.toMap())
-+        val currentSources = counters.mapTo(HashSet()) { it.source }
-+        val currentMacs = counters.mapTo(HashSet()) { it.mac }
-+        // A missing source can be retired or omitted by a partial daemon reply. Preserve totals,
-+        // but do not invent a complete rate for that MAC during this interval.
-+        val unavailable = previous.values.filter { it.source !in currentSources }.mapTo(HashSet()) { it.mac }
-+        retired.addAll(previous.keys - currentSources)
-+        previous.keys.retainAll(currentSources)
-+        val delta = HashMap<String, Totals>()
-+
-+        counters.forEach { current ->
-+            val old = previous.put(current.source, current)
-+            val wasRetired = retired.remove(current.source)
-+            val reset = old != null && (current.sent < old.sent || current.received < old.received)
-+            val sent = if (old == null || wasRetired || reset) 0 else current.sent - old.sent
-+            val received = if (old == null || wasRetired || reset) 0 else current.received - old.received
-+            if (sent > 0 || received > 0) lastChange[current.mac] = now
-+            if (old == null || wasRetired || reset) unavailable.add(current.mac)
-+            val before = totals[current.mac] ?: Totals(0, 0)
-+            totals[current.mac] = Totals(before.sent + sent, before.received + received)
-+            val change = delta[current.mac] ?: Totals(0, 0)
-+            delta[current.mac] = Totals(change.sent + sent, change.received + received)
-+        }
-+        val elapsed = sampledAt?.let { now - it }
-+        sampledAt = now
-+        return Sample(totals.toMap(), if (elapsed == null || elapsed <= 0) emptyMap() else
-+            totals.mapValues { (mac, _) ->
-+                val change = delta[mac] ?: Totals(0, 0)
-+                Totals(change.sent * 1000 / elapsed, change.received * 1000 / elapsed)
-+            }.filterKeys { it in currentMacs && it !in unavailable }, counters.isNotEmpty(), lastChange.toMap(), elapsed)
-+    }
-+}
-+
-+/** Immutable publication; expiration never changes the sampler baseline or retained totals. */
-+internal data class DashboardTrafficSnapshot(
-+    val sample: DashboardTraffic.Sample,
-+    val at: Long,
-+    val wallTime: Long,
-+    // Raw existing DNS packet counters, not a second DNS accountant or a success/failure estimate.
-+    val dnsPackets: Map<String, DashboardTraffic.Totals> = emptyMap(),
-+) {
-+    fun current(now: Long, available: Boolean = true): DashboardTraffic.Sample =
-+        // Original recorder cadence is at most one minute, plus the page's five-second fetch budget.
-+        // Rates describe their explicit observation window, never a one-second live promise.
-+        if (available && now - at <= 65_000) sample else sample.copy(rates = emptyMap(), available = false)
-+}
-+
-+/** Event-driven state stays valid through silence. Publication is atomic for concurrent HTTP readers. */
-+internal class DashboardObservation<T> {
-+    data class Snapshot<T>(val value: T?, val available: Boolean, val changedAt: Long?)
-+    @Volatile private var snapshot = Snapshot<T>(null, false, null)
-+    fun peek() = snapshot
-+    fun update(value: T, at: Long) { snapshot = Snapshot(value, true, at) }
-+    fun invalidate() { snapshot = snapshot.copy(available = false) }
-+}
-+
-+/** Neighbour entries are addresses, not separate clients or Wi-Fi associations. */
-+internal fun dashboardClients(addresses: List<Pair<String?, String>>): Map<String, List<String>> =
-+    addresses.mapNotNull { (mac, ip) -> mac?.let { it to ip } }
-+        .groupBy { it.first }
-+        .mapValues { (_, pairs) -> pairs.map { it.second }.distinct().sorted() }
-+        .toSortedMap()
-diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPage.kt b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPage.kt
-new file mode 100644
-index 00000000..c21b5540
---- /dev/null
-+++ b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPage.kt
-@@ -0,0 +1,73 @@
-+package be.mygod.vpnhotspot
-+
-+/** Local assets only. All server-supplied identity/error text is rendered through textContent. */
-+internal val DASHBOARD_PAGE = """
-+<!doctype html>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-+<title>VPNHotspot · 网络状态</title>
-+<style>
-+:root{color-scheme:light dark;--bg:#f2f5f9;--card:#fff;--ink:#142235;--muted:#536579;--line:#dce3ec;--accent:#186c65;--warn:#9d421d}
-+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,sans-serif}main,header{max-width:1320px;margin:auto;padding:24px}header{padding-bottom:0;display:flex;justify-content:space-between;gap:16px;align-items:center}h1{font-size:25px;margin:0}h2{font-size:19px;margin:0 0 16px}h3{font-size:16px;margin:0 0 8px}.eyebrow{color:var(--accent);font-size:12px;letter-spacing:.15em}.muted,small{color:var(--muted)}small{display:block}.card,section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.grid>.card{margin:0}.big{font-size:25px;font-weight:650;font-variant-numeric:tabular-nums}.label{font-size:13px;color:var(--muted)}.cards{margin-bottom:20px}.notice{padding:12px 16px;border-radius:10px;background:var(--card);border:1px solid var(--line);margin:20px 0}.error{color:var(--warn);border-color:var(--warn)}button,a.button{background:var(--accent);color:white;border:0;border-radius:9px;padding:10px 15px;font:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:default}a{color:var(--accent)}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}th{color:var(--muted);font-size:12px}td.ip{white-space:normal;min-width:190px;word-break:break-all}td.identity{min-width:165px;max-width:280px;white-space:normal;overflow-wrap:anywhere}code{font-size:12px;overflow-wrap:anywhere}dl{display:grid;grid-template-columns:minmax(100px,auto) 1fr;gap:8px 20px;margin:0}dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}details{margin-top:10px}summary{cursor:pointer;color:var(--accent)}.tag{display:inline-block;border-radius:5px;padding:2px 6px;background:var(--bg);font-size:12px}.empty{padding:24px;text-align:center;color:var(--muted)}#refreshState{margin:16px auto 0;max-width:1272px;padding:12px 16px}footer{color:var(--muted);font-size:13px;margin:12px 0}.networks>.card{overflow:hidden}.route{white-space:normal;overflow-wrap:anywhere}
-+@media(prefers-color-scheme:dark){:root{--bg:#111b28;--card:#192638;--ink:#e7eef7;--muted:#a4b6ca;--line:#304357;--accent:#72d8c3;--warn:#ffb995}button{color:#10251e}}@media(max-width:600px){main,header{padding:14px}header{align-items:flex-start}h1{font-size:22px}.grid{grid-template-columns:1fr 1fr}.networks{grid-template-columns:1fr}.card,section{padding:15px}dl{grid-template-columns:1fr;gap:2px}dd{margin-bottom:8px}#refreshState{margin:14px 14px 0}.big{font-size:21px}.scroll{overflow:visible}table,tbody{display:block}thead{display:none}#clients tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);border:1px solid var(--line);border-radius:10px;margin-bottom:14px;padding:8px}#clients td{display:block;grid-column:1/-1;min-width:0;max-width:none;white-space:normal;overflow-wrap:anywhere;padding:8px;border:0}#clients td:nth-child(4),#clients td:nth-child(5){grid-column:auto}#clients td::before{content:attr(data-label);display:block;font-size:12px;color:var(--muted);margin-bottom:3px}#clients td:last-child::before{display:none}#clients details{margin:0}#clients dl{grid-template-columns:minmax(90px,auto) minmax(0,1fr);gap:6px 10px;margin-top:8px;font-size:13px}#clients dd{margin:0}}
-+</style></head><body>
-+<header><div><div class="eyebrow">VPNHOTSPOT / READ ONLY</div><h1>网络状态</h1><small>页面每秒刷新 · 流量随原有记录器更新，后台约每分钟</small></div><button id="export" disabled>导出调试 JSON</button></header>
-+<div id="refreshState" class="notice" role="status" aria-live="polite">正在读取状态…</div>
-+<main id="dashboard"><div class="empty">等待第一次成功响应</div></main>
-+<script>
-+'use strict';
-+const byId=id=>document.getElementById(id);
-+const el=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined&&text!==null)n.textContent=String(text);if(cls)n.className=cls;return n};
-+const missing='不可用';
-+const number=v=>v===null||v===undefined?missing:Number(v).toLocaleString('zh-CN');
-+function bytes(v){if(v===null||v===undefined)return missing;let x=Number(v),u=0;const units=['B','KiB','MiB','GiB','TiB','PiB'];while(x>=1024&&u<units.length-1){x/=1024;u++}return x.toLocaleString('zh-CN',{maximumFractionDigits:u?2:0})+' '+units[u]}
-+const rate=v=>v===null||v===undefined?missing:bytes(v)+'/s';
-+const time=v=>v===null||v===undefined?missing:new Date(v).toLocaleString('zh-CN');
-+const duration=v=>v===null||v===undefined?missing:Math.floor(v/3600000)+'小时 '+Math.floor(v/60000)%60+'分 '+Math.floor(v/1000)%60+'秒';
-+const states={associated:'已连接（P2P 关联）',not_associated:'未关联（仍有邻居记录）',neighbour_valid:'邻居有效（关联未知）',neighbour_invalid:'邻居失效 / 未确认',unknown:'来源不可用（上次记录）'};
-+let lastRaw=null,lastSuccess=null,busy=false;
-+function check(s){
-+ if(!s||s.schema!==3||!Array.isArray(s.clients)||!s.traffic||!s.diagnostics||typeof s.gateway!=='string'||typeof s.downstream!=='string')throw Error('状态数据格式不匹配');
-+ if(!Array.isArray(s.diagnostics.recentErrors))throw Error('诊断数据不完整');
-+ for(const c of s.clients)if(!c||typeof c.mac!=='string'||!Array.isArray(c.ips)||!Array.isArray(c.interfaces)||!Array.isArray(c.neighbourStates))throw Error('设备数据不完整');
-+ for(const n of [s.vpn,s.primary,s.fallback])if(n!==null&&(!n||!Array.isArray(n.addresses)||!Array.isArray(n.routes)||!Array.isArray(n.dnsServers)))throw Error('上游数据不完整');
-+}
-+function pair(dl,key,value){dl.append(el('dt',key),el('dd',value===null||value===undefined?missing:value))}
-+function card(label,value,detail){const n=el('div',null,'card');n.append(el('div',label,'label'),el('div',value,'big'));if(detail)n.append(el('small',detail));return n}
-+function details(title,key,open){const d=el('details');d.dataset.key=key;d.open=open.has(key);d.append(el('summary',title));return d}
-+function network(label,n,key,open){
-+ const box=el('div',null,'card');box.append(el('h3',label));if(!n){box.append(el('p','当前没有可用网络','muted'));return box}
-+ const dl=el('dl');pair(dl,'接口',(n.interfaces||[n.interface]).join(' / '));pair(dl,'类型',n.type===null?missing:n.type.join(' / '));pair(dl,'网络 ID',n.network);pair(dl,'Android 验证',n.validated===null?missing:n.validated?'已验证':'未验证');pair(dl,'地址',n.addresses.join(' · ')||'无');pair(dl,'DNS',n.dnsServers.join(' · ')||'无');pair(dl,'能力观测时间',time(n.capabilitiesObservedAt));box.append(dl);
-+ const d=details('查看上游链路路由（'+n.routes.length+'）',key,open);const list=el('div');for(const r of n.routes)list.append(el('p',r.destination+' → '+(r.gateway||'直连')+' · '+(r.interface||missing)+' · type '+r.type,'route'));if(!n.routes.length)list.append(el('p','没有链路路由记录','muted'));d.append(list);box.append(d);return box;
-+}
-+function render(s){
-+ const open=new Set(Array.from(document.querySelectorAll('details[open]'),n=>n.dataset.key));const root=document.createDocumentFragment();
-+ const cards=el('div',null,'grid cards');cards.append(card('VPN',s.vpn?'已发现 VPN 网络':'未发现 VPN 网络',s.vpn?(s.vpn.interface||'接口未知'):'以 Android 网络回调为准'),card('已关联 / 观测设备',number(s.associatedClientCount)+' / '+number(s.observedClientCount),'关联数仅来自当前 P2P 组；邻居地址按 MAC 合并'),card('合计下载 ↓',rate(s.traffic.receiveBytesPerSecond),'本次页面服务会话累计 '+bytes(s.traffic.receiveBytes)),card('合计上传 ↑',rate(s.traffic.sendBytesPerSecond),'本次页面服务会话累计 '+bytes(s.traffic.sendBytes)));root.append(cards);
-+ const overview=el('section');overview.append(el('h2','当前共享'));const dl=el('dl');pair(dl,'下游接口',s.downstream);pair(dl,'实际网关',s.gateway+':'+s.port);pair(dl,'访问入口','http://vpnhotspot.lan:'+s.port+' / http://'+s.gateway+':'+s.port);pair(dl,'页面服务运行',duration(s.uptimeMillis));pair(dl,'主上游选择',s.selectedUpstream?(s.selectedUpstream.interface||'接口未知'):'无主上游');pair(dl,'备用当前使用',s.fallbackInUse===null?'不可用：程序没有逐流出口观测':String(s.fallbackInUse));pair(dl,'邻居来源',s.neighboursAvailable?'监控有效；没有变化时保留状态':'来源不可用；显示上次有效记录');pair(dl,'邻居设备 / 有效邻居',number(s.neighbourClientCount)+' / '+number(s.validNeighbourClientCount)+(s.neighboursAvailable?'':'（上次记录）'));pair(dl,'邻居最近变化',time(s.neighboursChangedAt));pair(dl,'流量来源',s.trafficAvailable?'已有部分计数观测；不代表所有源健康':'采样不可用；保留累计值，速率不可用');pair(dl,'速率观测窗口',duration(s.trafficRateWindowMillis));pair(dl,'流量样本年龄',duration(s.diagnostics.counterAgeMillis));overview.append(dl,el('small','速率是最近两次记录的区间均值，不是每秒实时采样。后台约每分钟记录；程序原有前台流量视图活跃时约每秒。新会话需两次记录才有速率。'));root.append(overview);
-+ const section=el('section');section.append(el('h2','设备明细'));section.append(el('p','名称优先使用程序保存的备注，其次使用 P2P 设备名。邻居有效不等于 Wi-Fi 已关联；地址移除或关联断开会按来源更新。','muted'));
-+ const scroll=el('div',null,'scroll'),table=el('table'),head=el('thead'),hr=el('tr');const labels=['设备 / MAC','状态 / 接口','IPv4 / IPv6','下载 ↓','上传 ↑','会话累计 ↓ / ↑','DNS 上游发送 / 接收','更多观测'];for(const label of labels)hr.append(el('th',label));head.append(hr);table.append(head);const body=el('tbody');body.id='clients';
-+ for(const c of s.clients){
-+  const row=el('tr');row.dataset.mac=c.mac;const identity=el('td',null,'identity');identity.append(el('strong',c.name||'名称不可用'),el('small',c.mac),el('small',c.nameSource||'没有已保存名称'));const state=el('td');state.append(el('span',states[c.state]||'状态未知','tag'),el('small',c.interfaces.join(' / ')),el('small',c.type));const ip=el('td',c.ips.join(' · ')||'尚无地址','ip');row.append(identity,state,ip,el('td',rate(c.receiveBytesPerSecond)),el('td',rate(c.sendBytesPerSecond)),el('td',bytes(c.receiveBytes)+' / '+bytes(c.sendBytes)));
-+  const dns=el('td',number(c.upstreamDnsSentPackets)+' / '+number(c.upstreamDnsReceivedPackets));dns.append(el('small',c.dnsCountersAvailable?'现有 DNS 源包计数':'当前不可用 / 上次计数'));row.append(dns);
-+  const more=el('td'),d=details('诊断明细','client-'+c.mac,open),cdl=el('dl');pair(cdl,'TCP 活跃流',number(c.activeTcpFlows));pair(cdl,'UDP 活跃流',number(c.activeUdpFlows));pair(cdl,'当前实际出口',c.currentEgress);pair(cdl,'DNS 成功 / 失败',number(c.dnsSuccessCount)+' / '+number(c.dnsFailureCount));pair(cdl,'最近流量计数变化',c.lastTrafficChangeAgoMillis===null?missing:duration(c.lastTrafficChangeAgoMillis)+'前（采样推断）');pair(cdl,'精确最后活动',c.lastActivityAt===null?'不可用：没有逐包时间':time(c.lastActivityAt));pair(cdl,'邻居地址状态',c.neighbourStates.map(n=>n.ip+' '+({0:'未设置',1:'解析中',2:'有效',3:'失败'}[n.state]||String(n.state))).join(' · ')||'无');d.append(cdl);more.append(d);row.append(more);Array.from(row.children).forEach((cell,index)=>cell.dataset.label=labels[index]);body.append(row);
-+ }
-+ table.append(body);scroll.append(table);section.append(scroll);if(!s.clients.length)section.append(el('div',s.neighboursAvailable?'当前没有观测到设备':'设备来源尚不可用；不能据此判断没有设备','empty'));section.append(el('small','累计值从本次页面服务首次计数基线开始，包括程序现有 IPv4、DNS 与 NAT66 源；不是历史账单。DNS 发送/接收不是成功/失败次数。'));root.append(section);
-+ const upstreams=el('section');upstreams.append(el('h2','上游网络'));const nets=el('div',null,'grid networks');nets.append(network('VPN 网络',s.vpn,'vpn',open),network('主上游（程序选择）',s.primary,'primary',open),network('备用上游（可用性）',s.fallback,'fallback',open));upstreams.append(nets,el('p','以上是 Android 网络与链路路由快照。主上游选择、备用可用与逐设备实际出口是不同信息；本页不推断流量是否经过备用。','muted'));root.append(upstreams);
-+ const diagnostics=el('section');diagnostics.append(el('h2','诊断'));const dx=el('dl');pair(dx,'记录器计数观测',s.diagnostics.counterObservation==='recorder_reply_observed'?'已有计数发布；可能缺少部分源':'不可用或等待原有记录周期');pair(dx,'守护进程完整健康','不可用：部分计数回复不能证明所有源健康');pair(dx,'计数采样时间',time(s.diagnostics.counterSampledAt));pair(dx,'计数样本年龄',duration(s.diagnostics.counterAgeMillis));pair(dx,'DNS 状态','仅有现有解析器发送/接收包计数；成功率、失败次数和实时健康不可用');pair(dx,'路由状态','可查看上游链路路由；下游实际转发与逐流出口状态不可用');pair(dx,'程序 / 补丁',s.diagnostics.appVersion+' ('+s.diagnostics.versionCode+') · '+s.diagnostics.patchRelease);pair(dx,'Android / 内核',s.diagnostics.android+' / API '+s.diagnostics.androidApi+' / '+(s.diagnostics.kernel||missing));pair(dx,'设备开机时间',duration(s.diagnostics.deviceUptimeMillis));diagnostics.append(dx,el('h3','最近观测错误'));const errors=el('div');for(const e of s.diagnostics.recentErrors)errors.append(el('p',time(e.at)+' · '+e.source+' · '+e.message));if(!s.diagnostics.recentErrors.length)errors.append(el('p','本次页面服务没有记录到观测错误','muted'));diagnostics.append(errors,el('small','范围：记录器发布、邻居监控及名称读取；不是完整 Android 系统日志。'));root.append(diagnostics);
-+ root.append(el('footer','只读页面 · 未提供修改网络或设备的操作 · JSON 使用机器字段保留可用性与 null 值'));
-+ return root;
-+}
-+async function refresh(){
-+ if(busy)return;busy=true;const controller=new AbortController(),deadline=setTimeout(()=>controller.abort(),5000);
-+ try{
-+  const response=await fetch('/api/status',{cache:'no-store',signal:controller.signal});if(!response.ok)throw Error('HTTP '+response.status);
-+  const raw=await response.text(),s=JSON.parse(raw);check(s);const next=render(s);
-+  byId('dashboard').replaceChildren(next);lastRaw=raw;lastSuccess=Date.now();byId('export').disabled=false;
-+  byId('refreshState').className='notice'+(!s.neighboursAvailable||!s.trafficAvailable?' error':'');
-+  byId('refreshState').textContent='更新成功 · '+time(lastSuccess)+(!s.neighboursAvailable?' · 邻居来源不可用，保留上次记录':'')+(!s.trafficAvailable?' · 流量采样不可用':'');
-+ }catch(error){byId('refreshState').className='notice error';byId('refreshState').textContent='刷新失败：'+error.message+(lastSuccess?'。保留上次成功数据（'+time(lastSuccess)+'）':'。尚无成功数据');}
-+ finally{clearTimeout(deadline);busy=false;setTimeout(refresh,1000)}
-+}
-+byId('export').addEventListener('click',()=>{if(lastRaw===null)return;const url=URL.createObjectURL(new Blob([lastRaw],{type:'application/json;charset=utf-8'})),a=el('a');a.href=url;a.download='vpnhotspot-debug.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)});
-+refresh();
-+</script></body></html>
-+""".trimIndent()
-diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPresentation.kt b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPresentation.kt
-new file mode 100644
-index 00000000..843c8bae
---- /dev/null
-+++ b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPresentation.kt
-@@ -0,0 +1,33 @@
-+package be.mygod.vpnhotspot
-+
-+/** Adapt the existing session counters; a missing baseline must not turn into a displayed zero speed. */
-+internal fun dashboardTrafficSummary(sample: DashboardTraffic.Sample): Map<String, Long?> {
-+    val totals = sample.totals.values.takeIf { it.isNotEmpty() }
-+    val rates = sample.rates.values.takeIf {
-+        sample.available && totals != null && sample.rates.keys.containsAll(sample.totals.keys)
-+    }
-+    return mapOf(
-+        "sendBytes" to totals?.sumOf { it.sent }, "receiveBytes" to totals?.sumOf { it.received },
-+        "sendBytesPerSecond" to rates?.sumOf { it.sent }, "receiveBytesPerSecond" to rates?.sumOf { it.received },
-+    )
-+}
-+
-+/** Small JSON boundary over immutable maps/lists; Android's JSON implementation is not required by JVM tests. */
-+internal fun dashboardJson(value: Any?): String = when (value) {
-+    null -> "null"
-+    is String -> buildString {
-+        append('"')
-+        value.forEach { char -> when (char) {
-+            '\\' -> append("\\\\")
-+            '"' -> append("\\\"")
-+            else -> if (char < ' ') append("\\u%04x".format(char.code)) else append(char)
-+        } }
-+        append('"')
-+    }
-+    is Boolean, is Number -> value.toString()
-+    is Map<*, *> -> value.entries.joinToString(",", "{", "}") {
-+        dashboardJson(it.key as String) + ":" + dashboardJson(it.value)
-+    }
-+    is Iterable<*> -> value.joinToString(",", "[", "]", transform = ::dashboardJson)
-+    else -> error("Unsupported dashboard JSON value: ${value.javaClass}")
-+}
-diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/RepeaterService.kt b/mobile/src/main/java/be/mygod/vpnhotspot/RepeaterService.kt
-index e3f54850..bac89973 100644
---- a/mobile/src/main/java/be/mygod/vpnhotspot/RepeaterService.kt
-+++ b/mobile/src/main/java/be/mygod/vpnhotspot/RepeaterService.kt
-@@ -292,6 +292,7 @@ class RepeaterService : Service(), CoroutineScope {
- 
-     private fun updateGroup(value: WifiP2pGroup?) {
-         group.value = value
-+        WebAdmin.observeP2pGroup(value)
-         value?.clientList?.let { timeoutMonitor?.onClientsChanged(it.isEmpty()) }
-     }
- 
-diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/RoutingManager.kt b/mobile/src/main/java/be/mygod/vpnhotspot/RoutingManager.kt
-index ec1ab859..b89ce8b7 100644
---- a/mobile/src/main/java/be/mygod/vpnhotspot/RoutingManager.kt
-+++ b/mobile/src/main/java/be/mygod/vpnhotspot/RoutingManager.kt
-@@ -82,6 +82,7 @@ abstract class RoutingManager(private val caller: Any, val downstream: String, p
-                 val routings = monitor.withLock {
-                     buildList(active.size) {
-                         active.forEachValue { manager ->
-+                            WebAdmin.stop(manager.downstream)
-                             manager.routing?.also {
-                                 manager.routing = null
-                                 add(it)
-@@ -217,6 +218,7 @@ abstract class RoutingManager(private val caller: Any, val downstream: String, p
-         routing.masqueradeMode = masqueradeMode
-         routing.configure()
-         routing.start()
-+        WebAdmin.start(downstream)
-     }
- 
-     protected abstract fun Routing.configure()
-@@ -229,6 +231,7 @@ abstract class RoutingManager(private val caller: Any, val downstream: String, p
-             } else {
-                 if (started) releaseLocked()
-                 started = false
-+                WebAdmin.stop(downstream)
-                 routing.also {
-                     routing = null
-                     if (it == null) active.remove(downstream, this@RoutingManager)
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
 new file mode 100644
-index 00000000..f8c307ab
+index 00000000..07d53d13
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
 @@ -0,0 +1,373 @@
@@ -427,7 +71,7 @@ index 00000000..f8c307ab
 +            targets.forEach { (iface, session) ->
 +                if (!session.resources.active) return@forEach
 +                // A cached publication from an earlier generation must not seed a new session.
-+                if (!snapshot.available || snapshot.at < session.createdAt) {
++                if (!snapshot.available || !snapshot.isNewerThan(session.createdAt)) {
 +                    session.trafficSnapshots.invalidate()
 +                    if (snapshot.wallTime != 0L && !snapshot.available)
 +                        session.error("traffic", "recorder observation unavailable; retaining last publication")
@@ -733,68 +377,8 @@ index 00000000..f8c307ab
 +
 +
 +}
-diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/net/NetlinkNeighbour.kt b/mobile/src/main/java/be/mygod/vpnhotspot/net/NetlinkNeighbour.kt
-index 9b3d975a..e152a87d 100644
---- a/mobile/src/main/java/be/mygod/vpnhotspot/net/NetlinkNeighbour.kt
-+++ b/mobile/src/main/java/be/mygod/vpnhotspot/net/NetlinkNeighbour.kt
-@@ -17,9 +17,12 @@ import kotlinx.coroutines.flow.SharingStarted
- import kotlinx.coroutines.flow.catch
- import kotlinx.coroutines.flow.distinctUntilChanged
- import kotlinx.coroutines.flow.drop
-+import kotlinx.coroutines.flow.filter
- import kotlinx.coroutines.flow.map
- import kotlinx.coroutines.flow.runningFold
- import kotlinx.coroutines.flow.shareIn
-+import kotlinx.coroutines.flow.onStart
-+import kotlinx.coroutines.flow.onCompletion
- import timber.log.Timber
- import okio.ByteString
- import java.io.IOException
-@@ -41,6 +44,9 @@ data class NetlinkNeighbour(val proto: Neighbour) {
-     data class Snapshot(
-         val neighbours: Collection<NetlinkNeighbour> = emptyList(),
-         val bridgeMasterByMember: PersistentMap<String, String> = persistentMapOf(),
-+        // Deltas are event-driven, not heartbeats. Only source lifecycle invalidates a snapshot.
-+        val available: Boolean = true,
-+        val unavailableReason: String? = null,
-     )
- 
-     companion object {
-@@ -56,7 +62,7 @@ data class NetlinkNeighbour(val proto: Neighbour) {
-             }
-         }
- 
--        val monitorSnapshots = DaemonController.neighbourMonitor().runningFold(MonitorState()) { state, update ->
-+        internal val monitorObservations = DaemonController.neighbourMonitor().runningFold(MonitorState()) { state, update ->
-             state.copy(
-                 neighbours = state.neighbours.mutate {
-                     for (delta in update.neighbour_deltas) {
-@@ -82,8 +88,12 @@ data class NetlinkNeighbour(val proto: Neighbour) {
-                     }
-                 } ?: state.bridgeMasterByMember,
-             )
--        }.drop(1).distinctUntilChanged().map { Snapshot(it.neighbours.values, it.bridgeMasterByMember) }.catch { e ->
-+        }.drop(1).distinctUntilChanged().map { Snapshot(it.neighbours.values, it.bridgeMasterByMember) }
-+            .onStart { emit(Snapshot(available = false)) }
-+            .onCompletion { cause -> if (cause == null) emit(Snapshot(available = false, unavailableReason = "monitor completed")) }
-+            .catch { e ->
-             if (e is CancellationException) throw e
-+            emit(Snapshot(available = false, unavailableReason = e.toString()))
-             Timber.w(e)
-             SmartSnackbar.make(e).show()
-         }.shareIn(
-@@ -92,6 +102,9 @@ data class NetlinkNeighbour(val proto: Neighbour) {
-             replay = 1,
-         )
- 
-+        // Existing routing/UI subscribers keep their original table-only semantics. Lifecycle
-+        // observations must never masquerade as an empty neighbour table and remove routed clients.
-+        val monitorSnapshots = monitorObservations.filter { it.available }
-         val snapshots = monitorSnapshots.map { it.neighbours }.distinctUntilChanged()
-     }
- }
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
-index 22a174cb..45bc625b 100644
+index 22a174cb..78415b36 100644
 --- a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
 @@ -21,6 +21,8 @@ import kotlinx.coroutines.channels.BufferOverflow
@@ -806,7 +390,7 @@ index 22a174cb..45bc625b 100644
  import kotlinx.coroutines.flow.onCompletion
  import kotlinx.coroutines.flow.onSubscription
  import kotlinx.coroutines.launch
-@@ -38,6 +40,16 @@ object TrafficRecorder {
+@@ -38,6 +40,18 @@ object TrafficRecorder {
          val oldRecords: LongObjectMap<TrafficRecord>,
      )
  
@@ -816,14 +400,16 @@ index 22a174cb..45bc625b 100644
 +        val at: Long = 0,
 +        val wallTime: Long = 0,
 +        val available: Boolean = false,
-+    )
++    ) {
++        fun isNewerThan(sessionCreatedAt: Long) = at >= sessionCreatedAt
++    }
 +    private val counterSnapshotsState = MutableStateFlow(CounterSnapshot())
 +    val counterSnapshots = counterSnapshotsState.asStateFlow()
 +
      private data class ClientKey(val mac: MacAddress, val downstream: String)
      data class CounterSource(val ip: InetAddress, val upstream: String?)
      data class CounterKey(
-@@ -122,6 +134,7 @@ object TrafficRecorder {
+@@ -122,6 +136,7 @@ object TrafficRecorder {
          try {
              val counters = DaemonController.readTrafficCounters()
              val timestamp = System.currentTimeMillis()
@@ -831,7 +417,7 @@ index 22a174cb..45bc625b 100644
              lastUpdate = timestamp
              val oldRecords = MutableLongObjectMap<TrafficRecord>()
              val seenKeys = MutableScatterSet<CounterKey>()
-@@ -171,6 +184,8 @@ object TrafficRecorder {
+@@ -171,6 +186,8 @@ object TrafficRecorder {
                          check(records.put(key, record) == oldRecord)
                          oldRecords[oldId] = oldRecord
                      }
@@ -840,7 +426,7 @@ index 22a174cb..45bc625b 100644
                  } catch (e: Exception) {
                      Timber.w(counter.toString())
                      Timber.w(e)
-@@ -187,9 +202,14 @@ object TrafficRecorder {
+@@ -187,9 +204,14 @@ object TrafficRecorder {
              }
              val newRecords = MutableObjectList<TrafficRecord>(records.size)
              records.forEachValue { newRecords.add(it) }
@@ -855,7 +441,7 @@ index 22a174cb..45bc625b 100644
              Timber.w(e)
              SmartSnackbar.make(e).show()
          }
-@@ -202,6 +222,7 @@ object TrafficRecorder {
+@@ -202,6 +224,7 @@ object TrafficRecorder {
          Timber.d("Cleaning records")
          activeClients.clear()
          records.clear()
@@ -863,189 +449,23 @@ index 22a174cb..45bc625b 100644
      }
  
      /**
-diff --git a/mobile/src/main/rust/vpnhotspotd/src/dns.rs b/mobile/src/main/rust/vpnhotspotd/src/dns.rs
-index f91ef2ff..2af4ddcf 100644
---- a/mobile/src/main/rust/vpnhotspotd/src/dns.rs
-+++ b/mobile/src/main/rust/vpnhotspotd/src/dns.rs
-@@ -546,6 +546,32 @@ async fn resolve_query_accounted(
- }
+diff --git a/mobile/src/test/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorderTest.kt b/mobile/src/test/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorderTest.kt
+index b62743f3..95e7904a 100644
+--- a/mobile/src/test/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorderTest.kt
++++ b/mobile/src/test/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorderTest.kt
+@@ -11,6 +11,15 @@ import org.junit.Test
+ import java.net.InetAddress
  
- async fn resolve_or_error(config: &SessionConfig, query: &[u8]) -> Option<DnsResponse> {
-+    if dns_wire::is_dashboard_query(query) {
-+        // Reuse downstream address selection: the default P2P address is not universal.
-+        let gateway = timeout(DNS_QUERY_TIMEOUT, async {
-+            let mut handle = crate::netlink::RequestConnection::new()?;
-+            crate::downstream::query_ipv4(&mut handle, &config.downstream).await
-+        })
-+        .await;
-+        let bytes = match gateway {
-+            Ok(Ok(Some(address))) => dns_wire::dashboard_response(query, address.address.octets()),
-+            Ok(Ok(None)) => dns_wire::servfail_response(query),
-+            Ok(Err(e)) => {
-+                report::io_with_details(
-+                    "dns.dashboard_gateway",
-+                    e,
-+                    [("downstream", config.downstream.clone())],
-+                );
-+                dns_wire::servfail_response(query)
-+            }
-+            Err(_) => dns_wire::servfail_response(query),
-+        };
-+        return bytes.map(|bytes| DnsResponse {
-+            bytes,
-+            sent_to_resolver: false,
-+            received_from_resolver: false,
-+        });
-+    }
-     let (result, sent_to_resolver) = resolve_query_accounted(config, query).await;
-     match result {
-         Ok(response) => Some(DnsResponse {
-diff --git a/mobile/src/main/rust/vpnhotspotd/src/downstream.rs b/mobile/src/main/rust/vpnhotspotd/src/downstream.rs
-index aba4160f..ed2fdb95 100644
---- a/mobile/src/main/rust/vpnhotspotd/src/downstream.rs
-+++ b/mobile/src/main/rust/vpnhotspotd/src/downstream.rs
-@@ -28,7 +28,7 @@ pub(crate) async fn wait_ipv4(
-     }
- }
- 
--async fn query_ipv4(
-+pub(crate) async fn query_ipv4(
-     handle: &mut netlink::RequestConnection,
-     downstream: &str,
- ) -> io::Result<Option<DownstreamIpv4>> {
-diff --git a/mobile/src/main/rust/vpnhotspotd/src/shared/dns_counter.rs b/mobile/src/main/rust/vpnhotspotd/src/shared/dns_counter.rs
-index a090c9df..76f4cd83 100644
---- a/mobile/src/main/rust/vpnhotspotd/src/shared/dns_counter.rs
-+++ b/mobile/src/main/rust/vpnhotspotd/src/shared/dns_counter.rs
-@@ -141,7 +141,15 @@ mod tests {
-             )),
-         );
- 
--        assert_eq!(counters.counters("ncm0", []).unwrap().len(), 1);
-+        counters.add_exchange(MAC, 30, 40, true, true).unwrap();
-+        // The accounting owner must receive the final values: a second reader would drain
-+        // this retirement before it can be persisted. Re-reading a published reply is safe.
-+        let retired = counters.counters("ncm0", []).unwrap();
-+        assert_eq!(retired.len(), 1);
-+        assert_eq!(retired[0].sent_bytes, 40);
-+        assert_eq!(retired[0].received_bytes, 60);
-+        let published = retired.clone();
-         assert!(counters.counters("ncm0", []).unwrap().is_empty());
-+        assert_eq!(published[0].sent_bytes, retired[0].sent_bytes);
-     }
- }
-diff --git a/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs b/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs
-index d13760b9..2c47aafb 100644
---- a/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs
-+++ b/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs
-@@ -6,6 +6,35 @@ const FLAGS_OPCODE_MASK: u8 = 0x78;
- const FLAGS_AD_CD_MASK: u8 = 0x30;
- const RCODE_SERVFAIL: u8 = 2;
- 
-+/// Only one ordinary IN question for the exact local management name is handled locally.
-+/// Everything else, including unrelated names, keeps the existing resolver path.
-+pub fn is_dashboard_query(query: &[u8]) -> bool {
-+    const NAME: &[u8] = b"\x0avpnhotspot\x03lan\0";
-+    query.len() >= HEADER_LEN + NAME.len() + 4
-+        && query[2] & 0xf8 == 0
-+        && query[4..6] == [0, 1]
-+        && query[HEADER_LEN..HEADER_LEN + NAME.len()].eq_ignore_ascii_case(NAME)
-+        && query[HEADER_LEN + NAME.len() + 2..HEADER_LEN + NAME.len() + 4] == [0, 1]
-+}
-+
-+pub fn dashboard_response(query: &[u8], gateway: [u8; 4]) -> Option<Vec<u8>> {
-+    if !is_dashboard_query(query) {
-+        return None;
-+    }
-+    let end = question_section_end(query)?;
-+    let mut response = query[..end].to_vec();
-+    response[2] = FLAG_RESPONSE | (query[2] & FLAG_RECURSION_DESIRED);
-+    response[3] = FLAG_RECURSION_AVAILABLE;
-+    response[6..12].fill(0);
-+    // AAAA and other types receive NODATA, never an invented IPv6 gateway.
-+    if query[end - 4..end - 2] == [0, 1] {
-+        response[7] = 1;
-+        response.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 5, 0, 4]);
-+        response.extend_from_slice(&gateway);
-+    }
-+    Some(response)
-+}
-+
- pub fn servfail_response(query: &[u8]) -> Option<Vec<u8>> {
-     if query.len() < HEADER_LEN || query[2] & FLAG_RESPONSE != 0 {
-         return None;
-@@ -68,6 +97,51 @@ fn name_end(packet: &[u8], mut offset: usize) -> Option<usize> {
- mod tests {
-     use super::servfail_response;
- 
-+    fn dashboard_query(name: &[u8], kind: u16) -> Vec<u8> {
-+        let mut query = vec![0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
-+        query.extend_from_slice(name);
-+        query.extend_from_slice(&kind.to_be_bytes());
-+        query.extend_from_slice(&[0, 1]);
-+        query
+ class TrafficRecorderTest {
++    @Test
++    fun delayedCounterPublicationCannotSeedANewSessionInTheSameMillisecond() {
++        val delayed = TrafficRecorder.CounterSnapshot(at = 1000, available = true)
++        // A publication collected after a restart can have the same truncated timestamp.
++        org.junit.Assert.assertFalse(delayed.isNewerThan(1000))
++        org.junit.Assert.assertFalse(delayed.isNewerThan(1001))
++        org.junit.Assert.assertTrue(delayed.copy(at = 1002).isNewerThan(1001))
 +    }
 +
-+    #[test]
-+    fn dashboard_exact_record_uses_actual_gateway_and_short_ttl() {
-+        let query = dashboard_query(b"\x0avpnhotspot\x03lan\0", 1);
-+        let response = super::dashboard_response(&query, [10, 23, 4, 1]).unwrap();
-+        assert_eq!(&response[response.len() - 4..], &[10, 23, 4, 1]);
-+        assert_eq!(&response[6..8], &[0, 1]);
-+        assert_eq!(
-+            &response[response.len() - 10..response.len() - 6],
-+            &[0, 0, 0, 5]
-+        );
-+        assert_eq!(&response[12..query.len()], &query[12..]);
-+        let uppercase = dashboard_query(b"\x0aVPNHOTSPOT\x03LAN\0", 1);
-+        assert!(super::dashboard_response(&uppercase, [192, 168, 8, 1]).is_some());
-+    }
-+
-+    #[test]
-+    fn dashboard_unrelated_queries_are_unchanged_and_aaaa_is_nodata() {
-+        for name in [
-+            b"\x07example\x03com\0".as_slice(),
-+            b"\x0avpnhotspot\x03lan\x04evil\0",
-+            b"\x03lan\0",
-+        ] {
-+            let query = dashboard_query(name, 1);
-+            let before = query.clone();
-+            assert!(super::dashboard_response(&query, [10, 0, 0, 1]).is_none());
-+            assert_eq!(query, before);
-+        }
-+        let query = dashboard_query(b"\x0avpnhotspot\x03lan\0", 28);
-+        let response = super::dashboard_response(&query, [10, 0, 0, 1]).unwrap();
-+        assert_eq!(&response[6..8], &[0, 0]);
-+        assert_eq!(response.len(), query.len());
-+        let mut malformed = query.clone();
-+        malformed[5] = 2;
-+        assert!(super::dashboard_response(&malformed, [10, 0, 0, 1]).is_none());
-+        assert!(super::dashboard_response(&query[..query.len() - 1], [10, 0, 0, 1]).is_none());
-+    }
-+
-     #[test]
-     fn error_response_preserves_question() {
-         let query = [
-diff --git a/mobile/src/main/rust/vpnhotspotd/src/shared/nat66_counter.rs b/mobile/src/main/rust/vpnhotspotd/src/shared/nat66_counter.rs
-index 3d89d4ed..462cf347 100644
---- a/mobile/src/main/rust/vpnhotspotd/src/shared/nat66_counter.rs
-+++ b/mobile/src/main/rust/vpnhotspotd/src/shared/nat66_counter.rs
-@@ -205,5 +205,18 @@ mod tests {
- 
-         let second = counters.counters("ncm0", active).unwrap();
-         assert_eq!(second.len(), 1);
-+        counters
-+            .add_sent_bytes(MAC, Nat66CounterSource::Tcp, 100)
-+            .unwrap();
-+        counters
-+            .add_received_bytes(MAC, Nat66CounterSource::Tcp, 200)
-+            .unwrap();
-+        let retired = counters.counters("ncm0", []).unwrap();
-+        assert_eq!(retired.len(), 1);
-+        assert_eq!(retired[0].sent_bytes, 112);
-+        assert_eq!(retired[0].received_bytes, 234);
-+        let published = retired.clone();
-+        assert!(counters.counters("ncm0", []).unwrap().is_empty());
-+        assert_eq!(published[0].received_bytes, retired[0].received_bytes);
-     }
- }
+     @Test
+     fun counterSourceMapsIpv4ForwardAddressToRealIpRow() {
+         val source = TrafficRecorder.counterSource(
