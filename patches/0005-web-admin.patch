@@ -239,7 +239,7 @@ index 00000000..09125705
 +        .toSortedMap()
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPage.kt b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPage.kt
 new file mode 100644
-index 00000000..169855e8
+index 00000000..9210df68
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPage.kt
 @@ -0,0 +1,73 @@
@@ -287,13 +287,13 @@ index 00000000..169855e8
 +function render(s){
 + const open=new Set(Array.from(document.querySelectorAll('details[open]'),n=>n.dataset.key));const root=document.createDocumentFragment();
 + const cards=el('div',null,'grid cards');cards.append(card('VPN',s.vpn?'已发现 VPN 网络':'未发现 VPN 网络',s.vpn?(s.vpn.interface||'接口未知'):'以 Android 网络回调为准'),card('已关联 / 观测设备',number(s.associatedClientCount)+' / '+number(s.observedClientCount),'关联数仅来自当前 P2P 组；邻居地址按 MAC 合并'),card('合计下载 ↓',rate(s.traffic.receiveBytesPerSecond),'本次页面服务会话累计 '+bytes(s.traffic.receiveBytes)),card('合计上传 ↑',rate(s.traffic.sendBytesPerSecond),'本次页面服务会话累计 '+bytes(s.traffic.sendBytes)));root.append(cards);
-+ const overview=el('section');overview.append(el('h2','当前共享'));const dl=el('dl');pair(dl,'下游接口',s.downstream);pair(dl,'实际网关',s.gateway+':'+s.port);pair(dl,'访问入口','http://vpnhotspot.lan:'+s.port+' / http://'+s.gateway+':'+s.port);pair(dl,'页面服务运行',duration(s.uptimeMillis));pair(dl,'主上游选择',s.selectedUpstream?(s.selectedUpstream.interface||'接口未知'):'无主上游');pair(dl,'备用当前使用',s.fallbackInUse===null?'不可用：程序没有逐流出口观测':String(s.fallbackInUse));pair(dl,'邻居来源',s.neighboursAvailable?'监控有效；没有变化时保留状态':'来源不可用；显示上次有效记录');pair(dl,'邻居最近变化',time(s.neighboursChangedAt));pair(dl,'流量来源',s.trafficAvailable?'计数器采样可用':'采样不可用；保留累计值，速率不可用');overview.append(dl);root.append(overview);
++ const overview=el('section');overview.append(el('h2','当前共享'));const dl=el('dl');pair(dl,'下游接口',s.downstream);pair(dl,'实际网关',s.gateway+':'+s.port);pair(dl,'访问入口','http://vpnhotspot.lan:'+s.port+' / http://'+s.gateway+':'+s.port);pair(dl,'页面服务运行',duration(s.uptimeMillis));pair(dl,'主上游选择',s.selectedUpstream?(s.selectedUpstream.interface||'接口未知'):'无主上游');pair(dl,'备用当前使用',s.fallbackInUse===null?'不可用：程序没有逐流出口观测':String(s.fallbackInUse));pair(dl,'邻居来源',s.neighboursAvailable?'监控有效；没有变化时保留状态':'来源不可用；显示上次有效记录');pair(dl,'邻居设备 / 有效邻居',number(s.neighbourClientCount)+' / '+number(s.validNeighbourClientCount)+(s.neighboursAvailable?'':'（上次记录）'));pair(dl,'邻居最近变化',time(s.neighboursChangedAt));pair(dl,'流量来源',s.trafficAvailable?'计数器采样可用':'采样不可用；保留累计值，速率不可用');overview.append(dl);root.append(overview);
 + const section=el('section');section.append(el('h2','设备明细'));section.append(el('p','名称优先使用程序保存的备注，其次使用 P2P 设备名。邻居有效不等于 Wi-Fi 已关联；地址移除或关联断开会按来源更新。','muted'));
 + const scroll=el('div',null,'scroll'),table=el('table'),head=el('thead'),hr=el('tr');for(const label of ['设备 / MAC','状态 / 接口','IPv4 / IPv6','下载 ↓','上传 ↑','会话累计 ↓ / ↑','DNS 上游发送 / 接收','更多观测'])hr.append(el('th',label));head.append(hr);table.append(head);const body=el('tbody');body.id='clients';
 + for(const c of s.clients){
 +  const row=el('tr');row.dataset.mac=c.mac;const identity=el('td',null,'identity');identity.append(el('strong',c.name||'名称不可用'),el('small',c.mac),el('small',c.nameSource||'没有已保存名称'));const state=el('td');state.append(el('span',states[c.state]||'状态未知','tag'),el('small',c.interfaces.join(' / ')),el('small',c.type));const ip=el('td',c.ips.join(' · ')||'尚无地址','ip');row.append(identity,state,ip,el('td',rate(c.receiveBytesPerSecond)),el('td',rate(c.sendBytesPerSecond)),el('td',bytes(c.receiveBytes)+' / '+bytes(c.sendBytes)));
 +  const dns=el('td',number(c.upstreamDnsSentPackets)+' / '+number(c.upstreamDnsReceivedPackets));dns.append(el('small',c.dnsCountersAvailable?'现有 DNS 源包计数':'当前不可用 / 上次计数'));row.append(dns);
-+  const more=el('td'),d=details('诊断明细','client-'+c.mac,open),cdl=el('dl');pair(cdl,'TCP 活跃流',number(c.activeTcpFlows));pair(cdl,'UDP 活跃流',number(c.activeUdpFlows));pair(cdl,'当前实际出口',c.currentEgress);pair(cdl,'DNS 成功 / 失败',number(c.dnsSuccessCount)+' / '+number(c.dnsFailureCount));pair(cdl,'最近流量计数变化',c.lastTrafficChangeAgoMillis===null?missing:duration(c.lastTrafficChangeAgoMillis)+'前（采样推断）');pair(cdl,'精确最后活动',c.lastActivityAt===null?'不可用：没有逐包时间':time(c.lastActivityAt));pair(cdl,'邻居地址状态',c.neighbourStates.map(n=>n.ip+' '+n.state).join(' · ')||'无');d.append(cdl);more.append(d);row.append(more);body.append(row);
++  const more=el('td'),d=details('诊断明细','client-'+c.mac,open),cdl=el('dl');pair(cdl,'TCP 活跃流',number(c.activeTcpFlows));pair(cdl,'UDP 活跃流',number(c.activeUdpFlows));pair(cdl,'当前实际出口',c.currentEgress);pair(cdl,'DNS 成功 / 失败',number(c.dnsSuccessCount)+' / '+number(c.dnsFailureCount));pair(cdl,'最近流量计数变化',c.lastTrafficChangeAgoMillis===null?missing:duration(c.lastTrafficChangeAgoMillis)+'前（采样推断）');pair(cdl,'精确最后活动',c.lastActivityAt===null?'不可用：没有逐包时间':time(c.lastActivityAt));pair(cdl,'邻居地址状态',c.neighbourStates.map(n=>n.ip+' '+({0:'未设置',1:'解析中',2:'有效',3:'失败'}[n.state]||String(n.state))).join(' · ')||'无');d.append(cdl);more.append(d);row.append(more);body.append(row);
 + }
 + table.append(body);scroll.append(table);section.append(scroll);if(!s.clients.length)section.append(el('div',s.neighboursAvailable?'当前没有观测到设备':'设备来源尚不可用；不能据此判断没有设备','empty'));section.append(el('small','累计值从本次页面服务首次计数基线开始，包括程序现有 IPv4、DNS 与 NAT66 源；不是历史账单。DNS 发送/接收不是成功/失败次数。'));root.append(section);
 + const upstreams=el('section');upstreams.append(el('h2','上游网络'));const nets=el('div',null,'grid networks');nets.append(network('VPN 网络',s.vpn,'vpn',open),network('主上游（程序选择）',s.primary,'primary',open),network('备用上游（可用性）',s.fallback,'fallback',open));upstreams.append(nets,el('p','以上是 Android 网络与链路路由快照。主上游选择、备用可用与逐设备实际出口是不同信息；本页不推断流量是否经过备用。','muted'));root.append(upstreams);
@@ -397,10 +397,10 @@ index ec1ab859..b89ce8b7 100644
                      if (it == null) active.remove(downstream, this@RoutingManager)
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
 new file mode 100644
-index 00000000..c94d248f
+index 00000000..f19744ad
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
-@@ -0,0 +1,376 @@
+@@ -0,0 +1,383 @@
 +package be.mygod.vpnhotspot
 +
 +import android.net.MacAddress
@@ -571,7 +571,8 @@ index 00000000..c94d248f
 +                    snapshot.neighbours.filter {
 +                        (snapshot.bridgeMasterByMember[it.dev] ?: it.dev) == iface
 +                    }.mapNotNull { it.lladdr }.toSet() +
-+                        association?.takeIf { it.first == iface }?.second.orEmpty().keys.map(MacAddress::fromString)
++                        association?.takeIf { (snapshot.bridgeMasterByMember[it.first] ?: it.first) == iface }
++                            ?.second.orEmpty().keys.map(MacAddress::fromString)
 +                }.collectLatest { macs ->
 +                    if (macs.isEmpty()) session.names = emptyMap() else combine(macs.map { mac ->
 +                        AppDatabase.instance.clientRecordDao.lookupOrDefaultFlow(mac)
@@ -672,7 +673,9 @@ index 00000000..c94d248f
 +        val snapshot = session.cache.peek()
 +        val sample = snapshot?.current(now) ?: DashboardTraffic.Sample(emptyMap(), emptyMap(), false)
 +        val observed = session.neighbours.peek() // event-driven; unchanged tables have no TTL
-+        val association = p2p.value?.takeIf { it.first == iface }?.second
++        val association = p2p.value?.takeIf {
++            (observed.value?.bridgeMasterByMember?.get(it.first) ?: it.first) == iface
++        }?.second
 +        val type = if (association != null) TetherType.WIFI_P2P else session.type
 +        val grouped = LinkedHashMap<String, Client>()
 +        association?.forEach { (mac, _) ->
@@ -701,7 +704,7 @@ index 00000000..c94d248f
 +                "ips" to client.ip.keys.map { it.hostAddress },
 +                "ipv4" to client.ip.keys.filterIsInstance<Inet4Address>().map { it.hostAddress },
 +                "ipv6" to client.ip.keys.filter { it !is Inet4Address }.map { it.hostAddress },
-+                "neighbourStates" to client.ip.map { (ip, info) -> mapOf("ip" to ip.hostAddress, "state" to info.state.name) },
++                "neighbourStates" to client.ip.map { (ip, info) -> mapOf("ip" to ip.hostAddress, "state" to info.state.value) },
 +                "online" to association?.containsKey(mac),
 +                "state" to when {
 +                    association?.containsKey(mac) == true -> "associated"
@@ -725,6 +728,10 @@ index 00000000..c94d248f
 +            "uptimeMillis" to (now - session.createdAt), "sampledAt" to snapshot?.wallTime?.takeIf { it != 0L },
 +            "trafficAvailable" to sample.available, "neighboursAvailable" to observed.available,
 +            "neighboursChangedAt" to observed.changedAt, "observedClientCount" to grouped.size,
++            "neighbourClientCount" to grouped.values.count { it.ip.isNotEmpty() },
++            "validNeighbourClientCount" to grouped.values.count { client ->
++                client.ip.values.any { it.state == NeighbourState.NEIGHBOUR_STATE_VALID }
++            },
 +            "associatedClientCount" to association?.size, "associationSource" to association?.let { "RepeaterService.group" },
 +            "clients" to clients, "traffic" to dashboardTrafficSummary(sample),
 +            "vpn" to session.vpn, "primary" to session.primary, "fallback" to session.fallback,

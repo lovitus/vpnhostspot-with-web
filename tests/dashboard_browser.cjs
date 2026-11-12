@@ -8,7 +8,7 @@ const output = process.argv[3];
 const client = (mac, ip) => ({
   mac, name: '测试设备 <img src=x onerror=alert(1)>', nameSource: 'ClientRecord', interface: 'p2p-test',
   interfaces: ['p2p-test'], type: 'WIFI_P2P', ips: [ip, 'fe80::2'], ipv4: [ip], ipv6: ['fe80::2'],
-  neighbourStates: [{ip, state: 'NEIGHBOUR_STATE_VALID'}], online: true, state: 'associated',
+  neighbourStates: [{ip, state: 2}], online: true, state: 'associated',
   sendBytesPerSecond: 1200, receiveBytesPerSecond: 2400, sendBytes: 1234567, receiveBytes: 7654321,
   upstreamDnsSentPackets: 10, upstreamDnsReceivedPackets: 9, dnsCountersAvailable: true,
   dnsSuccessCount: null, dnsFailureCount: null, activeTcpFlows: null, activeUdpFlows: null,

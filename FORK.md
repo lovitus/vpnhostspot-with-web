@@ -4,11 +4,13 @@
 
 另有一个 Rust 1.99 Clippy 兼容补丁：ICMP 校验和按两个字节迭代的写法改用 `as_chunks::<2>()`。输入为固定 16 字节数组，校验和计算、路由行为及外部状态均不改变，因此不需要新增 routing.md 状态说明。维护分支的上游 master 已将相关函数拆到 `icmp_quote.rs`，稳定版补丁仍针对 v3.0.8 的 `icmp_wire.rs` 重放。
 
-另有一个只读 Web 状态页面补丁 `patches/0005-web-admin.patch`。它在已有 downstream routing session 启动后，使用 app 进程绑定实际 downstream IPv4 地址的 80 端口，提供 `/` 和 `/api/status`。页面按 MAC 合并观测到的 IPv4/IPv6 邻居，显示已采样来源的记录字节、速率、primary/fallback 网络及地址；邻居数量不是 Wi-Fi 关联数量，primary 也不一定是 VPN，不代表每个客户端的实际出口。它不鉴权，没有封禁、配置修改、root 命令或控制 API。`vpnhotspot.lan` 在已有 daemon DNS 处理路径精确匹配，A 记录使用实际 downstream 网关、TTL 5 秒，AAAA 返回 NODATA；其他名称仍走原有 resolver。使用其他 DNS 的客户端可直接访问数字网关。
+只读 Web 页面补丁为 `patches/0005-web-admin.patch`，严格重放到 p4 源码 `ae6f39ed82153b5edf6c797bc1a27e17ab5ee845`。已有 downstream routing session 启动后，app 进程绑定实际 downstream IPv4 网关的 **8080** 端口；入口为 `http://vpnhotspot.lan:8080/` 或 `http://实际网关:8080/`，另有只读 `/api/status` 与 `/api/debug`（schema 3）。中文页面显示概览、设备身份/地址/状态、双向流量与 DNS 包计数、VPN/主/备用网络的地址、验证观测、DNS 与链路路由、诊断和调试 JSON 下载。它不鉴权，没有封禁、断开、清理、配置修改或控制 API。`vpnhotspot.lan` 在已有 daemon DNS 路径精确匹配，A 记录使用实际 downstream 网关、TTL 5 秒，AAAA 返回 NODATA；其他名称仍走原有 resolver。DNS 名称不包含端口，网址必须写 `:8080`。
 
-监听器与已接受连接由同一代 session 拥有，停止或 Clean 时立即关闭；旧任务的清理不能关闭新一代监听器。每个 downstream 最多 16 个请求，单行 4096 字节、最多 64 个头；3 秒绝对期限包括读取及响应写入。Host 仅接受实际绑定的数字地址或精确 `vpnhotspot.lan`（可带 `:80`）。80 端口绑定失败通过日志与应用提示报告，不启动 root HTTP 服务。状态 JSON 按接口缓存至少一秒，共享一次 recorder 采样及时间戳；失败/部分数据保留上次总量并标为 unavailable，速率为 null。总量以首次采样的现有 counter 为起点，再累计观测到的差值，保留消失来源的字节；不等同数据库历史总量，无法重建两次采样之间创建后又删除的来源。
+监听器与已接受连接由同一代 session 拥有，停止或 Clean 时立即关闭；旧任务的清理不能关闭新一代监听器。每个 downstream 最多 16 个请求，单行 4096 字节、最多 64 个头；3 秒绝对期限包括读取及响应写入。Host 仅接受实际绑定的数字地址或精确 `vpnhotspot.lan`，显式端口仅允许 `8080`，拒绝其他端口和任意后缀。绑定失败通过日志与应用提示报告。一个后台 sampler 使用 `DaemonController.readTrafficCounters()` 和 `TrafficRecorder.counterKey()`，不调用 recorder 更新、不等待 recorder 锁、不写流量数据库；超时与未结束的取消清理沿用隔离/限量机制。HTTP 只读已发布快照。失败或超时保留累计值，速率为 null；总量从本次服务首次计数基线开始，无法重建采样间隙内产生后又删除的来源。
 
-可执行回归（需要 JDK、含 compiler/stdlib/coroutines 的 Gradle lib 缓存；也可设置 `KOTLIN_LIB`）和独立 DNS wire 测试：
+设备列表复用 `NetlinkNeighbour.monitorSnapshots`、`Client`、`ClientRecord.Dao.lookupOrDefaultFlow()` 和 `RepeaterService.updateGroup()` 已有的 P2P 关联信息，不依赖 Activity，也不另建扫描器、连接跟踪、DNS 计费或路由选择。邻居快照是事件驱动的，稳定时不会定期重发；因此不按三秒年龄删除设备。监控启动、结束或失败明确使来源 unavailable，保留并标注上次有效记录；下一有效快照处理实际删除，新的服务代有全新缓存。设备数按 MAC 合并；P2P 关联数与邻居数分别显示。非 P2P 的 Wi-Fi 关联信息、TCP/UDP 活跃流、逐设备实际出口、备用是否在用、精确活动时间和 DNS 成功/失败总数均明确不可用。DNS 发送/接收包数不是成功/失败；最近流量变化只是现有计数差值的采样时间。详细字段来源及边界见 [dashboard-sampling.md](docs/dashboard-sampling.md)。
+
+构建和测试均在 GitHub Actions 的 `Dashboard patched source` workflow 对精确 p4 + patch 源码执行，不在本地安装或运行工具链。其 JVM 与 DNS 测试命令为：
 
 ```sh
 python tests/run_dashboard_behavior.py PATCHED_SOURCE
@@ -17,7 +19,7 @@ rustc --test PATCHED_SOURCE/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire
 DNS_TEST_BINARY
 ```
 
-JVM 测试实际运行 patch 中的 Kotlin helper、真实 loopback sockets、并发读者及阻塞写入。Python 检查仅验证 Android lifecycle 接线，不能替代设备实测。尚需在目标 Android/ROM 验证端口权限、热点 ingress 隔离、真实 DNS 转发、VPN 重连及 Clean；本次只验证补丁重放和编译，不签名、安装或发布。
+JVM 测试实际运行 patch 中的 Kotlin helper、真实 loopback sockets、并发读者、阻塞写入和稳定超过三秒的设备观察；Chromium 执行编译所得生产页面，覆盖 HTTP/JSON/结构/网络失败后的数据保留、恢复、空列表、导出及手机宽度。Python 检查仅验证 Android lifecycle 接线。CI 不等于 Android 下游实测；热点 ingress 隔离、真实 DNS 转发与设备连通性仍需单独验证。本实现任务不使用签名 secrets、不安装、不发布。
 
 
 `iptables-restore: line 10 failed` 本身不足以确认每一台设备的原因。若重启或本补丁的 Clean/reapply 后仍出错，需要应用版本、Android/ROM 版本、触发操作及“导出调试信息”里的 restore 输入。
