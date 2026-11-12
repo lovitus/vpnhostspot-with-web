@@ -82,6 +82,17 @@ class DashboardWiringTest(unittest.TestCase):
         self.assertEqual(self.web.count("DaemonController.readTrafficCounters()"), 1)
         self.assertIn("samplerJob.start()", self.web)
 
+    def test_recorder_is_the_only_destructive_counter_consumer(self):
+        root = Path(os.environ['VPNHOTSPOT_SOURCE']) / 'mobile/src/main/java'
+        consumers = [str(p.relative_to(root)).replace('\\', '/') for p in root.rglob('*.kt')
+                     if 'DaemonController.readTrafficCounters()' in p.read_text(encoding='utf-8')]
+        self.assertEqual(consumers, ['be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt'],
+                         'DNS/NAT66 retired counters are consumed once: Web must only observe recorder publications')
+        self.assertNotIn('TrafficRecorder.foregroundUpdates', self.web,
+                         'Web observations must not accelerate persistence to one row per source per second')
+        self.assertNotIn('TrafficRecorder.update(', self.web)
+        self.assertNotIn('TrafficRecorder.updateLocked(', self.web)
+
     def test_dashboard_retains_event_driven_neighbours(self):
         self.assertIn("Upstreams.vpn.collect", self.web)
         status = self.web[self.web.index("private fun status("):self.web.index("private fun upstreamJson")]
