@@ -794,7 +794,7 @@ index 9b3d975a..e152a87d 100644
      }
  }
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
-index 22a174cb..78415b36 100644
+index 22a174cb..0491a16c 100644
 --- a/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/net/monitor/TrafficRecorder.kt
 @@ -21,6 +21,8 @@ import kotlinx.coroutines.channels.BufferOverflow
@@ -817,7 +817,7 @@ index 22a174cb..78415b36 100644
 +        val wallTime: Long = 0,
 +        val available: Boolean = false,
 +    ) {
-+        fun isNewerThan(sessionCreatedAt: Long) = at >= sessionCreatedAt
++        fun isNewerThan(sessionCreatedAt: Long) = at > sessionCreatedAt
 +    }
 +    private val counterSnapshotsState = MutableStateFlow(CounterSnapshot())
 +    val counterSnapshots = counterSnapshotsState.asStateFlow()
