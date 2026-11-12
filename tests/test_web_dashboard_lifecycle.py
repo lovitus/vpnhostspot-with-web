@@ -72,15 +72,16 @@ class DashboardWiringTest(unittest.TestCase):
         status = self.web[self.web.index("private fun status("):self.web.index("private fun upstreamJson")]
         self.assertNotIn("readTrafficCounters", status)
         self.assertNotIn("trafficRecordDao", self.web)
-        self.assertIn("DashboardSampler", self.web)
-        self.assertIn("session.cache.peek()", status)
+        self.assertNotIn("DashboardSampler", self.web)
+        self.assertIn("session.trafficSnapshots.peek()", status)
         self.assertNotIn(".read {", status)
         self.assertNotIn(".sample(", status)
         self.assertIn("private fun status(", status,
                       "HTTP status must read published state without suspending behind a sampler")
         self.assertNotIn("TrafficRecorder.dashboardSnapshot()", self.web)
-        self.assertEqual(self.web.count("DaemonController.readTrafficCounters()"), 1)
-        self.assertIn("samplerJob.start()", self.web)
+        self.assertNotIn("DaemonController", self.web)
+        self.assertIn("TrafficRecorder.counterSnapshots.collect", self.web)
+        self.assertIn("observationJob.start()", self.web)
 
     def test_recorder_is_the_only_destructive_counter_consumer(self):
         root = Path(os.environ['VPNHOTSPOT_SOURCE']) / 'mobile/src/main/java'
@@ -92,6 +93,18 @@ class DashboardWiringTest(unittest.TestCase):
                          'Web observations must not accelerate persistence to one row per source per second')
         self.assertNotIn('TrafficRecorder.update(', self.web)
         self.assertNotIn('TrafficRecorder.updateLocked(', self.web)
+        recorder = (root / consumers[0]).read_text(encoding='utf-8')
+        scheduled = recorder[recorder.index('private fun scheduleUpdateLocked()'):recorder.index('suspend fun update()')]
+        self.assertIn('val minute = TimeUnit.MINUTES.toMillis(1)', scheduled)
+        self.assertIn('foregroundUpdatesState.subscriptionCount.value > 0', scheduled)
+        self.assertNotIn('counterSnapshots', scheduled)
+        self.assertIn('FOREGROUND_POLL_MS = 1015L', recorder)
+        self.assertIn('val counterSnapshots = counterSnapshotsState.asStateFlow()', recorder)
+        publication = recorder.index('CounterSnapshot(counters.toList(), observedAt, timestamp, true)')
+        self.assertLess(recorder.rindex('trafficRecordDao.insert(record)'), publication,
+                        'retired counters must reach the original persistence pass before Web publication')
+        self.assertNotIn('emit(', recorder[recorder.index('val counters = DaemonController'):publication],
+                         'publication must not suspend accounting behind a Web collector')
 
     def test_dashboard_retains_event_driven_neighbours(self):
         self.assertIn("Upstreams.vpn.collect", self.web)

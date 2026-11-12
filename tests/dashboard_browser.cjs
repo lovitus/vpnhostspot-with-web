@@ -20,11 +20,12 @@ const upstream = {network: 1234, interface: 'tun-test', interfaces: ['tun-test']
 const status = {
   schema: 3, downstream: 'p2p-test', gateway: '192.0.2.1', port: 8080, uptimeMillis: 65000,
   sampledAt: 1234567890000, trafficAvailable: true, neighboursAvailable: true, neighboursChangedAt: 1234567890000,
+  trafficRateWindowMillis: 60000,
   observedClientCount: 2, associatedClientCount: 2, associationSource: 'RepeaterService.group',
   clients: [client('02:00:00:00:00:01', '192.0.2.2'), client('02:00:00:00:00:02', '192.0.2.3')],
   traffic: {sendBytes: 1234567, receiveBytes: 7654321, sendBytesPerSecond: 1200, receiveBytesPerSecond: 2400},
   vpn: upstream, primary: upstream, fallback: null, selectedUpstream: upstream, fallbackInUse: null, currentEgress: null,
-  diagnostics: {daemon: 'counter_read_responsive', counterSampledAt: 1234567890000, counterAgeMillis: 1000,
+  diagnostics: {daemon: null, counterObservation: 'recorder_reply_observed', counterSampledAt: 1234567890000, counterAgeMillis: 1000,
     recentErrors: [], appVersion: '3.0.8-p4', versionCode: 2011004, patchRelease: '0005-dashboard-schema3',
     android: '16', androidApi: 36, kernel: 'test-kernel', deviceUptimeMillis: 999999},
 };
@@ -54,6 +55,8 @@ const server = http.createServer((req,res) => {
   await page.waitForFunction(()=>document.querySelectorAll('#clients tr').length===2);
   assert.match(await page.locator('#dashboard').innerText(),/主上游.*程序选择/s);
   assert.equal(await page.locator('#dashboard img').count(),0); // identity text cannot become markup
+  assert.match(await page.locator('#dashboard').innerText(),/区间均值.*不是每秒实时采样/s);
+  assert.match(await page.locator('#dashboard').innerText(),/部分计数回复不能证明所有源健康/);
   await page.waitForTimeout(3500);
   assert.equal(await page.locator('#clients tr').count(),2);
   assert.ok(requests>=3);
@@ -78,6 +81,18 @@ const server = http.createServer((req,res) => {
   await page.screenshot({path:output+'/dashboard-desktop.png',fullPage:true});
   await page.setViewportSize({width:390,height:844});
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
+  const layout = await page.locator('#clients tr').first().evaluate(row => {
+    const cells = Array.from(row.children, cell => ({label:cell.dataset.label,
+      left:cell.getBoundingClientRect().left,right:cell.getBoundingClientRect().right,
+      height:cell.getBoundingClientRect().height}));
+    return {cells, scrollWidth:row.closest('.scroll').scrollWidth, width:row.closest('.scroll').clientWidth};
+  });
+  assert.ok(layout.scrollWidth<=layout.width,'mobile clients require horizontal scrolling');
+  assert.ok(layout.cells.every(cell=>cell.left>=0&&cell.right<=390),'mobile fields lie outside viewport');
+  assert.ok(layout.cells[0].height<200,'expanded diagnostics stretches identity into a large blank row');
+  assert.equal(layout.cells[3].label,'下载 ↓');
+  assert.equal(layout.cells[4].label,'上传 ↑');
+  assert.equal(layout.cells[5].label,'会话累计 ↓ / ↑');
   await page.screenshot({path:output+'/dashboard-mobile.png',fullPage:true});
   mode='empty';await page.waitForFunction(()=>document.querySelectorAll('#clients tr').length===0);
   assert.match(await page.locator('#dashboard').innerText(),/当前没有观测到设备/);

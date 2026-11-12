@@ -5,7 +5,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
+
 import kotlin.concurrent.thread
 import kotlinx.coroutines.*
 
@@ -102,55 +102,28 @@ fun main() = runBlocking {
         }
         println("PASS absolute deadline closes stalled reads and writes")
     }
-    if (mode == "all" || mode == "cache") {
-        var now = 0L
-        val cache = DashboardCache<String> { now }
-        val loads = AtomicInteger()
-        suspend fun read() = cache.read { delay(2); "snapshot-${loads.incrementAndGet()}" }
-        check((1..64).map { async(Dispatchers.Default) { read() } }.awaitAll().toSet() == setOf("snapshot-1"))
-        now = 999; check(read() == "snapshot-1"); check(loads.get() == 1)
-        now = 1000
-        check((1..64).map { async(Dispatchers.Default) { read() } }.awaitAll().toSet() == setOf("snapshot-2"))
-        check(loads.get() == 2)
-        now = 2000
-        val cancelled = launch { cache.read { delay(10_000); "never" } }
-        delay(20); cancelled.cancelAndJoin()
-        check(cache.read { "snapshot-after-cancel" } == "snapshot-after-cancel")
-        println("PASS concurrent readers share an immutable snapshot and cancellation releases the cache")
-    }
-    if (mode == "all" || mode == "sampling") {
+    if (mode == "all" || mode == "cache" || mode == "sampling") {
         val owner = CoroutineScope(Dispatchers.Default + SupervisorJob())
         val entered = CompletableDeferred<Unit>()
-        val cancelling = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        val calls = AtomicInteger()
-        var now = 0L
-        val cache = DashboardCache<String> { now }
-        val sampler = DashboardSampler(owner, 200) {
-            when (calls.incrementAndGet()) {
-                1 -> "initial"
-                2 -> try {
-                    entered.complete(Unit)
-                    awaitCancellation()
-                } finally {
-                    cancelling.complete(Unit)
-                    // Model DaemonController's potentially stalled NonCancellable cleanup.
-                    withContext(NonCancellable) { release.await() }
-                }
-                else -> "recovered"
-            }
+        val publication = DashboardObservation<String>()
+        publication.update("initial", 1000)
+        // A recorder-owned update remains blocked independently of Web/session cancellation.
+        // This models the ownership boundary, without substituting for a real daemon test.
+        val recorderMutex = kotlinx.coroutines.sync.Mutex()
+        val recorder = owner.launch {
+            recorderMutex.lock()
+            try {
+                entered.complete(Unit)
+                release.await()
+                publication.update("recovered", 2000)
+            } finally { recorderMutex.unlock() }
         }
         try {
-            check(cache.peek() == null)
-            check(cache.read { sampler.read()!! } == "initial")
-            now = 1000
-            val cycle = async { cache.read { sampler.read() ?: "unavailable" } }
             withTimeout(2000) { entered.await() }
-            // Both direct status readers and real HTTP exchanges use the same production peek
-            // as WebAdmin.status. The loader mutex is held throughout the stalled cycle.
             withTimeout(2000) {
-                check((1..64).map { async(Dispatchers.Default) { cache.peek() } }
-                    .awaitAll().all { it in setOf("initial", "unavailable") })
+                check((1..64).map { async(Dispatchers.Default) { publication.peek().value } }
+                    .awaitAll().all { it == "initial" })
                 ServerSocket(0, 64, InetAddress.getLoopbackAddress()).use { server ->
                     val serving = async(Dispatchers.IO) {
                         coroutineScope {
@@ -159,8 +132,10 @@ fun main() = runBlocking {
                                 launch(Dispatchers.IO) {
                                     socket.use {
                                         check(DashboardHttp.read(it, System.nanoTime() + 1_000_000_000)?.path == "/api/status")
-                                        val body = cache.peek()!!
-                                        it.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\n\r\n" + body).toByteArray())
+                                        val body = publication.peek().value!!
+                                        val crlf = 13.toChar().toString() + 10.toChar()
+                                        it.getOutputStream().write((listOf("HTTP/1.1 200 OK",
+                                            "Content-Length: ${body.length}", "", body).joinToString(crlf)).toByteArray())
                                     }
                                 }
                             }
@@ -170,38 +145,39 @@ fun main() = runBlocking {
                         async(Dispatchers.IO) {
                             Socket(server.inetAddress, server.localPort).use { client ->
                                 client.soTimeout = 1500
-                                client.getOutputStream().write("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".toByteArray())
+                                val crlf = 13.toChar().toString() + 10.toChar()
+                                client.getOutputStream().write(listOf("GET /api/status HTTP/1.1",
+                                    "Host: 127.0.0.1", "", "").joinToString(crlf).toByteArray())
                                 client.getInputStream().readBytes().toString(Charsets.US_ASCII)
                             }
                         }
                     }.awaitAll()
                     check(responses.all { it.startsWith("HTTP/1.1 200 OK") &&
-                        it.substringAfter("\r\n\r\n") in setOf("initial", "unavailable") })
+                        it.endsWith("initial") })
                     serving.await()
                 }
             }
-            withTimeout(2000) { cancelling.await(); check(cycle.await() == "unavailable") }
-            repeat(20) { check(sampler.read() == null) }
-            check(calls.get() == 2) // no extra reads while cancellation cleanup is quarantined
-            check(!release.isCompleted) // HTTP/status finished before releasing the stalled read
+            val web = launch { awaitCancellation() }
+            web.cancelAndJoin()
+            check(recorder.isActive && recorderMutex.isLocked && !release.isCompleted)
+            check(publication.peek().value == "initial")
             release.complete(Unit)
-            withTimeout(2000) { owner.coroutineContext[Job]!!.children.toList().forEach { it.join() } }
-            now = 2000
-            check(cache.read { sampler.read()!! } == "recovered")
-            check(cache.peek() == "recovered" && calls.get() == 3)
-            println("PASS cached status and 32 HTTP exchanges during stalled sampling; bounded timeout, quarantine and recovery")
-        } finally {
-            release.complete(Unit)
-            owner.cancel()
-        }
+            withTimeout(2000) { recorder.join() }
+            check(publication.peek().value == "recovered")
+            publication.invalidate()
+            check(!publication.peek().available && publication.peek().value == "recovered")
+            println("PASS 64 publication readers and 32 HTTP exchanges while recorder is blocked; Web cancellation cannot cancel recorder")
+        } finally { release.complete(Unit); owner.cancel() }
         val fresh = DashboardTraffic.Sample(mapOf("mac" to DashboardTraffic.Totals(123, 456)),
-            mapOf("mac" to DashboardTraffic.Totals(10, 20)), true)
+            mapOf("mac" to DashboardTraffic.Totals(10, 20)), true, rateWindowMillis = 60_000)
         val snapshot = DashboardTrafficSnapshot(fresh, 1000, 9999)
-        check(snapshot.current(4000) == fresh)
-        val stale = snapshot.current(4001)
+        check(snapshot.current(66_000) == fresh)
+        val stale = snapshot.current(66_001)
         check(!stale.available && stale.rates.isEmpty() && stale.totals == fresh.totals)
-        check(snapshot.current(1000) == fresh) // reading does not mutate the published sample
-        println("PASS stale traffic suppresses rates and retains immutable totals")
+        check(!snapshot.current(1000, false).available)
+        check(snapshot.current(1000) == fresh)
+        check(snapshot.current(1000).rateWindowMillis == 60_000L)
+        println("PASS recorder cadence freshness, exact rate window, invalidation and immutable retained totals")
     }
     if (mode == "all" || mode == "neighbours") {
         val observed = DashboardObservation<List<Pair<String?, String>>>()
@@ -242,10 +218,16 @@ fun main() = runBlocking {
         check(dashboardTrafficSummary(failed)["sendBytesPerSecond"] == null)
         val recovered = samples.sample(listOf(b.copy(sent = 180, received = 300)), 3000, true)
         check(recovered.totals.getValue("mac").sent == 230L) // a source disappearance preserves totals
-        check(recovered.rates.getValue("mac").sent == 65L)
+        check(recovered.rates["mac"] == null) // missing source may mean a partial reply, not zero traffic
+        check(recovered.rateWindowMillis == 2000L)
         val reset = samples.sample(listOf(a.copy(sent = 10, received = 20), b.copy(sent = 180, received = 300)), 4000, true)
         check(reset.totals.getValue("mac").sent == 230L) // recreated/reset sources are not counted as deltas
         check(reset.rates["mac"] == null) // rate is unavailable across a source generation change
+        val partial = samples.sample(listOf(DashboardTraffic.Counter("other", "other-mac", 0, 0)), 5000, true)
+        check(partial.totals.getValue("mac").sent == 230L && partial.rates["mac"] == null)
+        check(dashboardTrafficSummary(partial)["sendBytesPerSecond"] == null)
+        val empty = samples.sample(emptyList(), 6000, false)
+        check(!empty.available && empty.rates.isEmpty() && empty.totals == partial.totals)
         println("PASS traffic failure preservation, rates, source churn and counter resets")
         val clients = dashboardClients(listOf("mac" to "192.168.1.2", "mac" to "fe80::2",
             "mac" to "192.168.1.2", null to "192.168.1.3", "other" to "192.168.1.4"))

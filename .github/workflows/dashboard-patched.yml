@@ -73,6 +73,11 @@ jobs:
         run: |
           rustc --test patched/mobile/src/main/rust/vpnhotspotd/src/shared/dns_wire.rs -o "$RUNNER_TEMP/dashboard-dns-tests"
           "$RUNNER_TEMP/dashboard-dns-tests"
+      - name: Execute production retired DNS and NAT66 counter regressions
+        working-directory: patched/mobile/src/main/rust/vpnhotspotd
+        run: |
+          cargo test --locked --lib shared::dns_counter::tests
+          cargo test --locked --lib shared::nat66_counter::tests
       - name: Preserve reports and exact patch
         if: always()
         uses: actions/upload-artifact@v7
