@@ -44,15 +44,36 @@ index f7218955..527809e4 100644
  DNS queries are sent through bionic's Android resolver API:
  
  - `android_res_nsend` starts a one-shot query on the selected Android network;
+diff --git a/mobile/build.gradle.kts b/mobile/build.gradle.kts
+index e1aff053..3e571cd9 100644
+--- a/mobile/build.gradle.kts
++++ b/mobile/build.gradle.kts
+@@ -358,6 +358,7 @@ tasks.register("verifyReleaseCoroutineDebugR8") {
+ 
+ dependencies {
+     compileOnly(files(hiddenApiStubsJar))
++    androidTestCompileOnly(files(hiddenApiStubsJar))
+     ksp(libs.room.compiler)
+     implementation(platform(libs.compose.bom))
+     implementation("androidx.compose.material3:material3")
 diff --git a/mobile/src/androidTest/java/be/mygod/vpnhotspot/DashboardSocketTest.kt b/mobile/src/androidTest/java/be/mygod/vpnhotspot/DashboardSocketTest.kt
 new file mode 100644
-index 00000000..31426ffa
+index 00000000..4e23a797
 --- /dev/null
 +++ b/mobile/src/androidTest/java/be/mygod/vpnhotspot/DashboardSocketTest.kt
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,118 @@
 +package be.mygod.vpnhotspot
 +
++import android.os.Binder
++import android.os.Parcel
 +import android.os.ParcelFileDescriptor
++import be.mygod.vpnhotspot.root.WebListener
++import kotlinx.coroutines.CompletableDeferred
++import kotlinx.coroutines.cancelAndJoin
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.withTimeout
++import java.util.concurrent.CountDownLatch
 +import androidx.test.ext.junit.runners.AndroidJUnit4
 +import org.junit.Assert.*
 +import org.junit.Test
@@ -67,6 +88,51 @@ index 00000000..31426ffa
 +/** Exercises the production adapter on Android, using real TCP descriptors, not framework mocks. */
 +@RunWith(AndroidJUnit4::class)
 +class DashboardSocketTest {
++    @Test fun blockedDeliveryDoesNotHoldListenerCancellation() = runBlocking {
++        val entered = CountDownLatch(1)
++        val resume = CountDownLatch(1)
++        val returned = CompletableDeferred<Unit>()
++        val receiver = object : Binder() {
++            override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
++                entered.countDown()
++                check(resume.await(10, TimeUnit.SECONDS))
++                reply!!.writeNoException()
++                return true
++            }
++        }
++        val ownerStarted = CompletableDeferred<Unit>()
++        val owner = launch {
++            WebListener.deliveries.launch {
++                val data = Parcel.obtain()
++                val reply = Parcel.obtain()
++                try {
++                    assertTrue(receiver.transact(1, data, reply, 0))
++                    reply.readException()
++                } finally {
++                    data.recycle()
++                    reply.recycle()
++                    returned.complete(Unit)
++                }
++            }
++            ownerStarted.complete(Unit)
++            kotlinx.coroutines.awaitCancellation()
++        }
++        try {
++            ownerStarted.await()
++            assertTrue(entered.await(2, TimeUnit.SECONDS))
++            withTimeout(1000) { owner.cancelAndJoin() }
++            assertFalse(returned.isCompleted)
++            // Another listener can schedule work while the previous receiver is still stalled.
++            val replacement = CompletableDeferred<Unit>()
++            WebListener.deliveries.launch { replacement.complete(Unit) }
++            withTimeout(1000) { replacement.await() }
++        } finally {
++            resume.countDown()
++            withTimeout(2000) { returned.await() }
++            owner.cancelAndJoin()
++        }
++    }
++
 +    @Test fun acceptedDescriptorPreservesHttpHostAndResponse() {
 +        val address = InetAddress.getByName("127.0.0.1")
 +        ServerSocket(0, 1, address).use { listener ->
@@ -524,10 +590,10 @@ index ec1ab859..b89ce8b7 100644
                      if (it == null) active.remove(downstream, this@RoutingManager)
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
 new file mode 100644
-index 00000000..f7bf3b0a
+index 00000000..8e8a6b15
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
-@@ -0,0 +1,413 @@
+@@ -0,0 +1,411 @@
 +package be.mygod.vpnhotspot
 +
 +import android.net.MacAddress
@@ -736,17 +802,15 @@ index 00000000..f7bf3b0a
 +                                            try { socket.close() } finally {
 +                                                session.resources.detach(socket)
 +                                                val request = Parcel.obtain()
-+                                                val response = Parcel.obtain()
 +                                                try {
 +                                                    request.writeInterfaceToken(WebListener.DESCRIPTOR)
-+                                                    if (!completion.transact(WebListener.FINISH, request, response, 0))
++                                                    if (!completion.transact(WebListener.FINISH, request, null, IBinder.FLAG_ONEWAY))
 +                                                        throw IOException("Dashboard completion receiver unavailable")
-+                                                    response.readException()
 +                                                } catch (e: android.os.RemoteException) {
 +                                                    Timber.w(e, "Dashboard root entry exited")
 +                                                } catch (e: IOException) {
 +                                                    Timber.w(e, "Dashboard completion failed; root deadline owns cleanup")
-+                                                } finally { response.recycle(); request.recycle() }
++                                                } finally { request.recycle() }
 +                                            }
 +                                        }
 +                                    }
@@ -1075,10 +1139,10 @@ index 22a174cb..0491a16c 100644
      /**
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/root/WebListener.kt b/mobile/src/main/java/be/mygod/vpnhotspot/root/WebListener.kt
 new file mode 100644
-index 00000000..9915e686
+index 00000000..484a6b40
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/root/WebListener.kt
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,166 @@
 +package be.mygod.vpnhotspot.root
 +
 +import android.os.Binder
@@ -1093,6 +1157,8 @@ index 00000000..9915e686
 +import be.mygod.librootkotlinx.ParcelableBoolean
 +import be.mygod.librootkotlinx.RootFlow
 +import be.mygod.vpnhotspot.DashboardDeadline
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.SupervisorJob
 +import kotlinx.coroutines.Dispatchers
 +import kotlinx.coroutines.Job
 +import kotlinx.coroutines.cancelAndJoin
@@ -1118,6 +1184,9 @@ index 00000000..9915e686
 +        const val FINISH = IBinder.FIRST_CALL_TRANSACTION + 1
 +        // A global cap bounds root FDs and simultaneous delivery transactions across downstreams.
 +        private val active = java.util.concurrent.Semaphore(16)
++        // Binder transact cannot be cancelled. These globally bounded deliveries outlive a
++        // stopped listener until the receiver returns/dies; never join them during rebind.
++        internal val deliveries = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 +        private val generations = HashMap<String, Job>()
 +        private val replacement = Mutex()
 +    }
@@ -1180,7 +1249,7 @@ index 00000000..9915e686
 +                            if (stopped) connection.close() else connections.add(connection)
 +                        }
 +                        val deadline = DashboardDeadline.arm(connection, 3000)
-+                        val delivery = launch(Dispatchers.IO) {
++                        val delivery = deliveries.launch {
 +                            try {
 +                                val completion = object : Binder() {
 +                                    override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
