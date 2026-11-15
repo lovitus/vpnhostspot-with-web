@@ -1,8 +1,8 @@
 diff --git a/README.md b/README.md
-index 68ca4b9b..d7dcffa1 100644
+index 68ca4b9b..30428432 100644
 --- a/README.md
 +++ b/README.md
-@@ -246,8 +246,13 @@ Other:
+@@ -246,8 +246,14 @@ Other:
    That fallback is expected on only kernels without effective `FRA_IP_PROTO` policy-rule support, which upstream Linux added in 4.17.
    Probe cleanup deletes at most one rule, omitting `FRA_IP_PROTO` when support or
    the mutation outcome is uncertain; repeated stale-rule deletion is reserved for Clean.
@@ -11,10 +11,11 @@ index 68ca4b9b..d7dcffa1 100644
 +* Daemon reply sockets and the root-owned dashboard listener use the AOSP local-network protected
 +  mark `0x00030063`, which assumes `LOCAL_NET_ID = 99` plus the `explicitlySelected` and
 +  `protectedFromVpn` fwmark bits. The dashboard requires root creation **and accept** to avoid
-+  app-UID VPN ingress filtering. Its private Binder endpoint passes accepted sockets to the app;
-+  ROM SELinux must permit this FD transfer and app I/O. Stop/Clean closes the listener and shuts
-+  down accepted sockets in both owners; no persistent firewall or routing state is added.
-+  A bind, marking or IPC failure leaves the dashboard unavailable and is reported explicitly.
++  app-UID VPN ingress filtering. Root retains external TCP and relays bytes to an app-owned,
++  loopback-only ephemeral listener authenticated by a fresh 256-bit session capability. No root
++  TCP descriptor crosses SELinux domains. Nonblocking relays are globally capped at 16 with a
++  three-second accept-to-close deadline. Stop/Clean closes both transports; no persistent firewall,
++  SELinux relaxation or UID-wide VPN exemption is added. Bind/mark failures are reported explicitly.
  
  System/root command assumptions:
  
