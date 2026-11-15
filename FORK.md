@@ -4,7 +4,7 @@
 
 另有一个 Rust 1.99 Clippy 兼容补丁：ICMP 校验和按两个字节迭代的写法改用 `as_chunks::<2>()`。输入为固定 16 字节数组，校验和计算、路由行为及外部状态均不改变，因此不需要新增 routing.md 状态说明。维护分支的上游 master 已将相关函数拆到 `icmp_quote.rs`，稳定版补丁仍针对 v3.0.8 的 `icmp_wire.rs` 重放。
 
-只读 Web 页面补丁为 `patches/0005-web-admin.patch`，严格重放到 p4 源码 `ae6f39ed82153b5edf6c797bc1a27e17ab5ee845`。已有 downstream routing session 启动后，现有 root service 绑定实际 downstream IPv4 网关的 **8080** 端口并以 root 接受连接，listen 前设置本地回程 mark `0x00030063`；私有同步 Binder 将已接受 FD 交给 app 处理 HTTP，RootFlow 只传就绪状态，避免其取消缓冲中的 PFD 泄漏；入口为 `http://vpnhotspot.lan:8080/` 或 `http://实际网关:8080/`，另有只读 `/api/status` 与 `/api/debug`（schema 3）。中文页面显示概览、设备身份/地址/状态、双向流量与 DNS 包计数、VPN/主/备用网络的地址、验证观测、DNS 与链路路由、诊断和调试 JSON 下载。它不鉴权，没有封禁、断开、清理、配置修改或控制 API。`vpnhotspot.lan` 在已有 daemon DNS 路径精确匹配，A 记录使用实际 downstream 网关、TTL 5 秒，AAAA 返回 NODATA；其他名称仍走原有 resolver。DNS 名称不包含端口，网址必须写 `:8080`。
+只读 Web 页面补丁为 `patches/0005-web-admin.patch`，严格重放到 p4 源码 `ae6f39ed82153b5edf6c797bc1a27e17ab5ee845`。已有 downstream routing session 启动后，现有 root service 绑定实际 downstream IPv4 网关的 **8080** 端口并以 root 接受连接，listen 前设置本地回程 mark `0x00030063`；root 保留外部 TCP，通过带每代随机 256 位凭据的 app-owned 127.0.0.1 临时端口中继字节，RootFlow 只传就绪状态，不交付 TCP FD；入口为 `http://vpnhotspot.lan:8080/` 或 `http://实际网关:8080/`，另有只读 `/api/status` 与 `/api/debug`（schema 3）。中文页面显示概览、设备身份/地址/状态、双向流量与 DNS 包计数、VPN/主/备用网络的地址、验证观测、DNS 与链路路由、诊断和调试 JSON 下载。它不鉴权，没有封禁、断开、清理、配置修改或控制 API。`vpnhotspot.lan` 在已有 daemon DNS 路径精确匹配，A 记录使用实际 downstream 网关、TTL 5 秒，AAAA 返回 NODATA；其他名称仍走原有 resolver。DNS 名称不包含端口，网址必须写 `:8080`。
 
 监听器与已接受连接由同一代 session 拥有，停止或 Clean 时立即关闭；旧任务的清理不能关闭新一代监听器。每个 downstream 最多 16 个请求，单行 4096 字节、最多 64 个头；3 秒绝对期限包括读取及响应写入。Host 仅接受实际绑定的数字地址或精确 `vpnhotspot.lan`，显式端口仅允许 `8080`，拒绝其他端口和任意后缀。绑定失败通过日志与应用提示报告。流量计数仅由原有 `TrafficRecorder` 消费并按原有周期入库，再发布只读 `counterSnapshots`；Web 不再调用 daemon 计数命令，不订阅会加速入库的前台流，也不请求 recorder 更新。HTTP 只读已发布快照，不等待 recorder 锁或 daemon I/O，页面停止/取消不会取消 recorder 的请求。后台约每分钟更新流量，原有 Android 前台流量视图活跃时约每秒；页面每秒刷新不等于流量实时采样。速率显示实际观测窗口与样本年龄，超过 65 秒或失败时保留累计值、速率为 null。部分计数回复不能证明全部来源或 daemon 健康。总量从本次服务首次计数基线开始，属于可合并发布的观测值，无法重建采样间隙内产生后又删除的来源；历史账务仍由原有数据库负责。
 
@@ -22,7 +22,7 @@ DNS_TEST_BINARY
 JVM 测试实际运行 patch 中的 Kotlin helper、真实 loopback sockets、并发读者、阻塞写入和稳定超过三秒的设备观察；Chromium 执行编译所得生产页面，覆盖 HTTP/JSON/结构/网络失败后的数据保留、恢复、空列表、导出及手机宽度。Python 检查仅验证 Android lifecycle 接线。CI 不等于 Android 下游实测；热点 ingress 隔离、真实 DNS 转发与设备连通性仍需单独验证。本实现任务不使用签名 secrets、不安装、不发布。
 
 
-详细入口所有权、Binder 交付、停止/Clean 和 ROM 兼容边界见 [dashboard-root-entry.md](docs/dashboard-root-entry.md)。root 全局最多保留 16 个已接受连接，root 与 app 均有独立三秒绝对期限；停止会 shutdown 已接受连接并关闭全部本地副本。Android 29 云端模拟器运行生产 DashboardSocket 的真实 TCP/PFD 测试；仍需实机确认 root→app Binder/SELinux、VPN 开启时下游及本机访问、停止和反复重建的 FD 数量。`agent/web-device-fix` 仅新增无签名 CI 触发，signed-test 仍限 master 且沿用既有环境审批。
+详细入口所有权、认证回环中继、停止/Clean 和 ROM 兼容边界见 [dashboard-root-entry.md](docs/dashboard-root-entry.md)。真实 API33 enforcing 设备已证明旧 FD 交付被 SELinux 拒绝，因此彻底移除该架构。root 非阻塞事件循环全局最多16连接，三秒绝对期限包括连接、认证和响应，停止关闭两端；app仅访问自身创建的 TCP。Android29 测试覆盖真实回环认证/Host/关闭。`agent/web-device-fix` 仅启用无签名 CI，signed-test 仍限 master 且沿用环境审批。
 
 `iptables-restore: line 10 failed` 本身不足以确认每一台设备的原因。若重启或本补丁的 Clean/reapply 后仍出错，需要应用版本、Android/ROM 版本、触发操作及“导出调试信息”里的 restore 输入。
 
