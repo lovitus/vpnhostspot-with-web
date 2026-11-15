@@ -354,10 +354,10 @@ index 00000000..db159baf
 +        .toSortedMap()
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPage.kt b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPage.kt
 new file mode 100644
-index 00000000..c21b5540
+index 00000000..8bdedd19
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPage.kt
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,102 @@
 +package be.mygod.vpnhotspot
 +
 +/** Local assets only. All server-supplied identity/error text is rendered through textContent. */
@@ -368,7 +368,8 @@ index 00000000..c21b5540
 +<style>
 +:root{color-scheme:light dark;--bg:#f2f5f9;--card:#fff;--ink:#142235;--muted:#536579;--line:#dce3ec;--accent:#186c65;--warn:#9d421d}
 +*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,sans-serif}main,header{max-width:1320px;margin:auto;padding:24px}header{padding-bottom:0;display:flex;justify-content:space-between;gap:16px;align-items:center}h1{font-size:25px;margin:0}h2{font-size:19px;margin:0 0 16px}h3{font-size:16px;margin:0 0 8px}.eyebrow{color:var(--accent);font-size:12px;letter-spacing:.15em}.muted,small{color:var(--muted)}small{display:block}.card,section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.grid>.card{margin:0}.big{font-size:25px;font-weight:650;font-variant-numeric:tabular-nums}.label{font-size:13px;color:var(--muted)}.cards{margin-bottom:20px}.notice{padding:12px 16px;border-radius:10px;background:var(--card);border:1px solid var(--line);margin:20px 0}.error{color:var(--warn);border-color:var(--warn)}button,a.button{background:var(--accent);color:white;border:0;border-radius:9px;padding:10px 15px;font:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:default}a{color:var(--accent)}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}th{color:var(--muted);font-size:12px}td.ip{white-space:normal;min-width:190px;word-break:break-all}td.identity{min-width:165px;max-width:280px;white-space:normal;overflow-wrap:anywhere}code{font-size:12px;overflow-wrap:anywhere}dl{display:grid;grid-template-columns:minmax(100px,auto) 1fr;gap:8px 20px;margin:0}dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}details{margin-top:10px}summary{cursor:pointer;color:var(--accent)}.tag{display:inline-block;border-radius:5px;padding:2px 6px;background:var(--bg);font-size:12px}.empty{padding:24px;text-align:center;color:var(--muted)}#refreshState{margin:16px auto 0;max-width:1272px;padding:12px 16px}footer{color:var(--muted);font-size:13px;margin:12px 0}.networks>.card{overflow:hidden}.route{white-space:normal;overflow-wrap:anywhere}
-+@media(prefers-color-scheme:dark){:root{--bg:#111b28;--card:#192638;--ink:#e7eef7;--muted:#a4b6ca;--line:#304357;--accent:#72d8c3;--warn:#ffb995}button{color:#10251e}}@media(max-width:600px){main,header{padding:14px}header{align-items:flex-start}h1{font-size:22px}.grid{grid-template-columns:1fr 1fr}.networks{grid-template-columns:1fr}.card,section{padding:15px}dl{grid-template-columns:1fr;gap:2px}dd{margin-bottom:8px}#refreshState{margin:14px 14px 0}.big{font-size:21px}.scroll{overflow:visible}table,tbody{display:block}thead{display:none}#clients tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);border:1px solid var(--line);border-radius:10px;margin-bottom:14px;padding:8px}#clients td{display:block;grid-column:1/-1;min-width:0;max-width:none;white-space:normal;overflow-wrap:anywhere;padding:8px;border:0}#clients td:nth-child(4),#clients td:nth-child(5){grid-column:auto}#clients td::before{content:attr(data-label);display:block;font-size:12px;color:var(--muted);margin-bottom:3px}#clients td:last-child::before{display:none}#clients details{margin:0}#clients dl{grid-template-columns:minmax(90px,auto) minmax(0,1fr);gap:6px 10px;margin-top:8px;font-size:13px}#clients dd{margin:0}}
++[hidden]{display:none!important}.capsules{display:flex;gap:8px;overflow-x:auto;padding:4px 0 12px;max-width:100%}.capsules button{flex:none;border-radius:999px;background:var(--bg);color:var(--ink);border:1px solid var(--line);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.capsules button[aria-pressed=true]{background:var(--accent);color:var(--card)}button:focus-visible,summary:focus-visible{outline:3px solid var(--warn);outline-offset:2px}.client-controls{display:flex;gap:8px;margin:8px 0 16px}.client-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:14px;align-items:start}.client-card{min-width:0;border:1px solid var(--line);border-radius:12px;padding:16px;overflow-wrap:anywhere}.client-stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.client-stats .card{padding:10px;margin:0}.client-card dl{grid-template-columns:minmax(90px,auto) minmax(0,1fr);gap:6px 10px;margin-top:12px;font-size:13px}.client-card .big{font-size:21px}
++@media(prefers-color-scheme:dark){:root{--bg:#111b28;--card:#192638;--ink:#e7eef7;--muted:#a4b6ca;--line:#304357;--accent:#72d8c3;--warn:#ffb995}button{color:#10251e}}@media(max-width:600px){main,header{padding:14px}header{align-items:flex-start}h1{font-size:22px}.grid{grid-template-columns:1fr 1fr}.networks{grid-template-columns:1fr}.card,section{padding:15px}dl{grid-template-columns:1fr;gap:2px}dd{margin-bottom:8px}#refreshState{margin:14px 14px 0}.big{font-size:21px}.client-card dd{margin:0}}
 +</style></head><body>
 +<header><div><div class="eyebrow">VPNHOTSPOT / READ ONLY</div><h1>网络状态</h1><small>页面每秒刷新 · 流量随原有记录器更新，后台约每分钟</small></div><button id="export" disabled>导出调试 JSON</button></header>
 +<div id="refreshState" class="notice" role="status" aria-live="polite">正在读取状态…</div>
@@ -384,7 +385,7 @@ index 00000000..c21b5540
 +const time=v=>v===null||v===undefined?missing:new Date(v).toLocaleString('zh-CN');
 +const duration=v=>v===null||v===undefined?missing:Math.floor(v/3600000)+'小时 '+Math.floor(v/60000)%60+'分 '+Math.floor(v/1000)%60+'秒';
 +const states={associated:'已连接（P2P 关联）',not_associated:'未关联（仍有邻居记录）',neighbour_valid:'邻居有效（关联未知）',neighbour_invalid:'邻居失效 / 未确认',unknown:'来源不可用（上次记录）'};
-+let lastRaw=null,lastSuccess=null,busy=false;
++let lastRaw=null,lastSuccess=null,busy=false,selectedMAC=null;
 +function check(s){
 + if(!s||s.schema!==3||!Array.isArray(s.clients)||!s.traffic||!s.diagnostics||typeof s.gateway!=='string'||typeof s.downstream!=='string')throw Error('状态数据格式不匹配');
 + if(!Array.isArray(s.diagnostics.recentErrors))throw Error('诊断数据不完整');
@@ -403,25 +404,53 @@ index 00000000..c21b5540
 + const open=new Set(Array.from(document.querySelectorAll('details[open]'),n=>n.dataset.key));const root=document.createDocumentFragment();
 + const cards=el('div',null,'grid cards');cards.append(card('VPN',s.vpn?'已发现 VPN 网络':'未发现 VPN 网络',s.vpn?(s.vpn.interface||'接口未知'):'以 Android 网络回调为准'),card('已关联 / 观测设备',number(s.associatedClientCount)+' / '+number(s.observedClientCount),'关联数仅来自当前 P2P 组；邻居地址按 MAC 合并'),card('合计下载 ↓',rate(s.traffic.receiveBytesPerSecond),'本次页面服务会话累计 '+bytes(s.traffic.receiveBytes)),card('合计上传 ↑',rate(s.traffic.sendBytesPerSecond),'本次页面服务会话累计 '+bytes(s.traffic.sendBytes)));root.append(cards);
 + const overview=el('section');overview.append(el('h2','当前共享'));const dl=el('dl');pair(dl,'下游接口',s.downstream);pair(dl,'实际网关',s.gateway+':'+s.port);pair(dl,'访问入口','http://vpnhotspot.lan:'+s.port+' / http://'+s.gateway+':'+s.port);pair(dl,'页面服务运行',duration(s.uptimeMillis));pair(dl,'主上游选择',s.selectedUpstream?(s.selectedUpstream.interface||'接口未知'):'无主上游');pair(dl,'备用当前使用',s.fallbackInUse===null?'不可用：程序没有逐流出口观测':String(s.fallbackInUse));pair(dl,'邻居来源',s.neighboursAvailable?'监控有效；没有变化时保留状态':'来源不可用；显示上次有效记录');pair(dl,'邻居设备 / 有效邻居',number(s.neighbourClientCount)+' / '+number(s.validNeighbourClientCount)+(s.neighboursAvailable?'':'（上次记录）'));pair(dl,'邻居最近变化',time(s.neighboursChangedAt));pair(dl,'流量来源',s.trafficAvailable?'已有部分计数观测；不代表所有源健康':'采样不可用；保留累计值，速率不可用');pair(dl,'速率观测窗口',duration(s.trafficRateWindowMillis));pair(dl,'流量样本年龄',duration(s.diagnostics.counterAgeMillis));overview.append(dl,el('small','速率是最近两次记录的区间均值，不是每秒实时采样。后台约每分钟记录；程序原有前台流量视图活跃时约每秒。新会话需两次记录才有速率。'));root.append(overview);
-+ const section=el('section');section.append(el('h2','设备明细'));section.append(el('p','名称优先使用程序保存的备注，其次使用 P2P 设备名。邻居有效不等于 Wi-Fi 已关联；地址移除或关联断开会按来源更新。','muted'));
-+ const scroll=el('div',null,'scroll'),table=el('table'),head=el('thead'),hr=el('tr');const labels=['设备 / MAC','状态 / 接口','IPv4 / IPv6','下载 ↓','上传 ↑','会话累计 ↓ / ↑','DNS 上游发送 / 接收','更多观测'];for(const label of labels)hr.append(el('th',label));head.append(hr);table.append(head);const body=el('tbody');body.id='clients';
++ const section=el('section');section.id='client-section';section.append(el('h2','设备明细'));section.append(el('p','名称：备注 → 系统主机名 → P2P 设备名 → 短 MAC。全部表示同时显示各台设备，不合并设备流量。','muted'));
++ if(selectedMAC!==null&&!s.clients.some(c=>c.mac===selectedMAC))selectedMAC=null;
++ const capsules=el('div',null,'capsules');capsules.id='client-capsules';capsules.setAttribute('role','group');capsules.setAttribute('aria-label','选择设备');
++ const all=el('button','全部（'+s.clients.length+'）');all.dataset.select='';all.dataset.key='select-all';all.setAttribute('aria-pressed',String(selectedMAC===null));capsules.append(all);
++ for(const c of s.clients){const b=el('button',c.name||c.mac.slice(-8));b.dataset.select=c.mac;b.dataset.key='select-'+c.mac;b.title=c.mac;b.setAttribute('aria-pressed',String(selectedMAC===c.mac));capsules.append(b)}
++ const controls=el('div',null,'client-controls');const expand=el('button','全部展开'),collapse=el('button','全部收起');expand.dataset.expand='true';collapse.dataset.expand='false';controls.append(expand,collapse);section.append(capsules,controls);
++ const body=el('div',null,'client-cards');body.id='clients';
 + for(const c of s.clients){
-+  const row=el('tr');row.dataset.mac=c.mac;const identity=el('td',null,'identity');identity.append(el('strong',c.name||'名称不可用'),el('small',c.mac),el('small',c.nameSource||'没有已保存名称'));const state=el('td');state.append(el('span',states[c.state]||'状态未知','tag'),el('small',c.interfaces.join(' / ')),el('small',c.type));const ip=el('td',c.ips.join(' · ')||'尚无地址','ip');row.append(identity,state,ip,el('td',rate(c.receiveBytesPerSecond)),el('td',rate(c.sendBytesPerSecond)),el('td',bytes(c.receiveBytes)+' / '+bytes(c.sendBytes)));
-+  const dns=el('td',number(c.upstreamDnsSentPackets)+' / '+number(c.upstreamDnsReceivedPackets));dns.append(el('small',c.dnsCountersAvailable?'现有 DNS 源包计数':'当前不可用 / 上次计数'));row.append(dns);
-+  const more=el('td'),d=details('诊断明细','client-'+c.mac,open),cdl=el('dl');pair(cdl,'TCP 活跃流',number(c.activeTcpFlows));pair(cdl,'UDP 活跃流',number(c.activeUdpFlows));pair(cdl,'当前实际出口',c.currentEgress);pair(cdl,'DNS 成功 / 失败',number(c.dnsSuccessCount)+' / '+number(c.dnsFailureCount));pair(cdl,'最近流量计数变化',c.lastTrafficChangeAgoMillis===null?missing:duration(c.lastTrafficChangeAgoMillis)+'前（采样推断）');pair(cdl,'精确最后活动',c.lastActivityAt===null?'不可用：没有逐包时间':time(c.lastActivityAt));pair(cdl,'邻居地址状态',c.neighbourStates.map(n=>n.ip+' '+({0:'未设置',1:'解析中',2:'有效',3:'失败'}[n.state]||String(n.state))).join(' · ')||'无');d.append(cdl);more.append(d);row.append(more);Array.from(row.children).forEach((cell,index)=>cell.dataset.label=labels[index]);body.append(row);
++  const row=el('article',null,'client-card');row.dataset.mac=c.mac;row.dataset.key='card-'+c.mac;row.hidden=selectedMAC!==null&&selectedMAC!==c.mac;
++  const identity=el('div',null,'identity');identity.append(el('strong',c.name||c.mac.slice(-8)),el('small',c.mac),el('span',states[c.state]||'状态未知','tag'));row.append(identity);
++  const stats=el('div',null,'client-stats');stats.append(card('下载 ↓',rate(c.receiveBytesPerSecond)),card('上传 ↑',rate(c.sendBytesPerSecond)));row.append(stats);
++  const d=details('设备与诊断明细','client-'+c.mac,open),cdl=el('dl');pair(cdl,'名称来源',c.nameSource);pair(cdl,'系统主机名',(c.hostnames||[]).join(' · ')||'未提供 / 无可靠归属');pair(cdl,'主机名来源',c.hostnameSource);pair(cdl,'主机名状态',({available:'有效',empty:'系统未提供匹配主机名',waiting:'等待系统回调',unsupported:'Android 版本不支持',unavailable:'来源不可用',error:'来源错误',stopped:'会话已停止'}[c.hostnameStatus]||missing));pair(cdl,'主机名地址',(c.hostnameAddresses||[]).map(n=>n.ip+' → '+n.hostname+' · '+n.type+' · '+n.downstream).join(' / ')||'无');pair(cdl,'主机名最近更新',time(c.hostnameChangedAt));pair(cdl,'接口 / 类型',c.interfaces.join(' / ')+' · '+c.type);pair(cdl,'IPv4 / IPv6',c.ips.join(' · ')||'尚无地址');pair(cdl,'会话累计 ↓ / ↑',bytes(c.receiveBytes)+' / '+bytes(c.sendBytes));pair(cdl,'DNS 上游发送 / 接收',number(c.upstreamDnsSentPackets)+' / '+number(c.upstreamDnsReceivedPackets)+(c.dnsCountersAvailable?'（现有 DNS 源包计数）':'（当前不可用 / 上次计数）'));pair(cdl,'TCP 活跃流',number(c.activeTcpFlows));pair(cdl,'UDP 活跃流',number(c.activeUdpFlows));pair(cdl,'当前实际出口',c.currentEgress);pair(cdl,'DNS 成功 / 失败',number(c.dnsSuccessCount)+' / '+number(c.dnsFailureCount));pair(cdl,'最近流量计数变化',c.lastTrafficChangeAgoMillis===null?missing:duration(c.lastTrafficChangeAgoMillis)+'前（采样推断）');pair(cdl,'精确最后活动',c.lastActivityAt===null?'不可用：没有逐包时间':time(c.lastActivityAt));pair(cdl,'邻居地址状态',c.neighbourStates.map(n=>n.ip+' '+({0:'未设置',1:'解析中',2:'有效',3:'失败'}[n.state]||String(n.state))).join(' · ')||'无');d.append(cdl);row.append(d);body.append(row);
 + }
-+ table.append(body);scroll.append(table);section.append(scroll);if(!s.clients.length)section.append(el('div',s.neighboursAvailable?'当前没有观测到设备':'设备来源尚不可用；不能据此判断没有设备','empty'));section.append(el('small','累计值从本次页面服务首次计数基线开始，包括程序现有 IPv4、DNS 与 NAT66 源；不是历史账单。DNS 发送/接收不是成功/失败次数。'));root.append(section);
++ section.append(body);if(!s.clients.length)section.append(el('div',s.neighboursAvailable?'当前没有观测到设备':'设备来源尚不可用；不能据此判断没有设备','empty'));section.append(el('small','系统可能不提供主机名，尤其是 P2P；不按厂商猜测。邻居有效不等于 Wi-Fi 已关联。累计值从本次页面服务首次计数基线开始，不是历史账单。DNS 包数不是成功/失败次数。'));root.append(section);
 + const upstreams=el('section');upstreams.append(el('h2','上游网络'));const nets=el('div',null,'grid networks');nets.append(network('VPN 网络',s.vpn,'vpn',open),network('主上游（程序选择）',s.primary,'primary',open),network('备用上游（可用性）',s.fallback,'fallback',open));upstreams.append(nets,el('p','以上是 Android 网络与链路路由快照。主上游选择、备用可用与逐设备实际出口是不同信息；本页不推断流量是否经过备用。','muted'));root.append(upstreams);
 + const diagnostics=el('section');diagnostics.append(el('h2','诊断'));const dx=el('dl');pair(dx,'记录器计数观测',s.diagnostics.counterObservation==='recorder_reply_observed'?'已有计数发布；可能缺少部分源':'不可用或等待原有记录周期');pair(dx,'守护进程完整健康','不可用：部分计数回复不能证明所有源健康');pair(dx,'计数采样时间',time(s.diagnostics.counterSampledAt));pair(dx,'计数样本年龄',duration(s.diagnostics.counterAgeMillis));pair(dx,'DNS 状态','仅有现有解析器发送/接收包计数；成功率、失败次数和实时健康不可用');pair(dx,'路由状态','可查看上游链路路由；下游实际转发与逐流出口状态不可用');pair(dx,'程序 / 补丁',s.diagnostics.appVersion+' ('+s.diagnostics.versionCode+') · '+s.diagnostics.patchRelease);pair(dx,'Android / 内核',s.diagnostics.android+' / API '+s.diagnostics.androidApi+' / '+(s.diagnostics.kernel||missing));pair(dx,'设备开机时间',duration(s.diagnostics.deviceUptimeMillis));diagnostics.append(dx,el('h3','最近观测错误'));const errors=el('div');for(const e of s.diagnostics.recentErrors)errors.append(el('p',time(e.at)+' · '+e.source+' · '+e.message));if(!s.diagnostics.recentErrors.length)errors.append(el('p','本次页面服务没有记录到观测错误','muted'));diagnostics.append(errors,el('small','范围：记录器发布、邻居监控及名称读取；不是完整 Android 系统日志。'));root.append(diagnostics);
 + root.append(el('footer','只读页面 · 未提供修改网络或设备的操作 · JSON 使用机器字段保留可用性与 null 值'));
 + return root;
 +}
++// Keep keyed controls/cards in place during polling: no lost focus, capsule scroll or details state.
++function reconcile(target,source){
++ const key=n=>n.nodeType===1?(n.id||n.dataset.key||null):null;
++ const old=Array.from(target.childNodes),used=new Set();let cursor=target.firstChild;
++ for(const fresh of Array.from(source.childNodes)){
++  const k=key(fresh);const current=old.find(n=>!used.has(n)&&n.nodeType===fresh.nodeType&&n.nodeName===fresh.nodeName&&key(n)===k);
++  const node=current||fresh;
++  if(current){used.add(current);if(node.nodeType===3){if(node.nodeValue!==fresh.nodeValue)node.nodeValue=fresh.nodeValue}else{for(const attr of Array.from(node.attributes))if(!fresh.hasAttribute(attr.name))node.removeAttribute(attr.name);for(const attr of Array.from(fresh.attributes))if(node.getAttribute(attr.name)!==attr.value)node.setAttribute(attr.name,attr.value);reconcile(node,fresh)}}
++  if(node!==cursor)target.insertBefore(node,cursor);cursor=node.nextSibling;
++ }
++ for(const node of old)if(!used.has(node)&&node.parentNode===target){const focused=node.contains(document.activeElement);node.remove();if(focused)byId('client-capsules')?.querySelector('button')?.focus({preventScroll:true})}
++}
++byId('dashboard').addEventListener('click',event=>{
++ const button=event.target.closest('button');if(!button)return;
++ if(button.dataset.select!==undefined){selectedMAC=button.dataset.select||null;for(const card of document.querySelectorAll('#clients .client-card'))card.hidden=selectedMAC!==null&&card.dataset.mac!==selectedMAC;for(const capsule of document.querySelectorAll('#client-capsules button'))capsule.setAttribute('aria-pressed',String((capsule.dataset.select||null)===selectedMAC))}
++ if(button.dataset.expand!==undefined)for(const detail of document.querySelectorAll('#clients details'))detail.open=button.dataset.expand==='true';
++});
 +async function refresh(){
 + if(busy)return;busy=true;const controller=new AbortController(),deadline=setTimeout(()=>controller.abort(),5000);
 + try{
 +  const response=await fetch('/api/status',{cache:'no-store',signal:controller.signal});if(!response.ok)throw Error('HTTP '+response.status);
 +  const raw=await response.text(),s=JSON.parse(raw);check(s);const next=render(s);
-+  byId('dashboard').replaceChildren(next);lastRaw=raw;lastSuccess=Date.now();byId('export').disabled=false;
++  const focused=document.activeElement,scrollX=window.scrollX,scrollY=window.scrollY,capsules=byId('client-capsules'),capsuleScroll=capsules?.scrollLeft;
++  reconcile(byId('dashboard'),next);
++  if(focused?.isConnected&&document.activeElement!==focused)focused.focus({preventScroll:true});
++  if(capsules?.isConnected)capsules.scrollLeft=capsuleScroll;
++  if(window.scrollX!==scrollX||window.scrollY!==scrollY)window.scrollTo(scrollX,scrollY);
++  lastRaw=raw;lastSuccess=Date.now();byId('export').disabled=false;
 +  byId('refreshState').className='notice'+(!s.neighboursAvailable||!s.trafficAvailable?' error':'');
 +  byId('refreshState').textContent='更新成功 · '+time(lastSuccess)+(!s.neighboursAvailable?' · 邻居来源不可用，保留上次记录':'')+(!s.trafficAvailable?' · 流量采样不可用':'');
 + }catch(error){byId('refreshState').className='notice error';byId('refreshState').textContent='刷新失败：'+error.message+(lastSuccess?'。保留上次成功数据（'+time(lastSuccess)+'）':'。尚无成功数据');}
@@ -433,10 +462,10 @@ index 00000000..c21b5540
 +""".trimIndent()
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPresentation.kt b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPresentation.kt
 new file mode 100644
-index 00000000..843c8bae
+index 00000000..92acf84c
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardPresentation.kt
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,63 @@
 +package be.mygod.vpnhotspot
 +
 +/** Adapt the existing session counters; a missing baseline must not turn into a displayed zero speed. */
@@ -449,6 +478,36 @@ index 00000000..843c8bae
 +        "sendBytes" to totals?.sumOf { it.sent }, "receiveBytes" to totals?.sumOf { it.received },
 +        "sendBytesPerSecond" to rates?.sumOf { it.sent }, "receiveBytesPerSecond" to rates?.sumOf { it.received },
 +    )
++}
++
++/** Values copied from ClientsChanged; no Android objects or callback-owned collections escape publication. */
++internal data class DashboardHostnameAddress(val mac: String, val type: String, val ip: String, val hostname: String?)
++internal data class DashboardClientLocation(val mac: String, val type: String, val ip: String, val downstream: String)
++internal data class DashboardHostnames(
++    val status: String = "waiting", val addresses: List<DashboardHostnameAddress> = emptyList(),
++    val changedAt: Long? = null,
++)
++
++/** Require an actual MAC/IP match, compatible tether type and exactly one canonical downstream.
++ * ClientsChanged has no interface identifier: ambiguous multi-downstream matches must stay unnamed.
++ */
++internal fun dashboardHostnames(snapshot: DashboardHostnames, locations: List<DashboardClientLocation>,
++                               downstream: String, mac: String): List<DashboardHostnameAddress> {
++    if (snapshot.status != "available") return emptyList()
++    return snapshot.addresses.filter { address ->
++        address.mac == mac && address.type != "NONE" && !address.hostname.isNullOrBlank() && locations.filter {
++            it.mac == mac && it.ip == address.ip &&
++                (it.type == address.type || it.type == "NCM" && address.type == "USB")
++        }.map { it.downstream }.distinct() == listOf(downstream)
++    }.distinct().sortedWith(compareBy({ it.ip }, { it.hostname }))
++}
++
++internal fun dashboardClientName(mac: String, nickname: String?, hostnames: List<DashboardHostnameAddress>,
++                                 p2pName: String?): Pair<String, String> = when {
++    !nickname.isNullOrBlank() -> nickname to "ClientRecord"
++    hostnames.isNotEmpty() -> hostnames.first().hostname!! to "TetheringManagerCompat.ClientsChanged"
++    !p2pName.isNullOrBlank() -> p2pName to "RepeaterService.group"
++    else -> mac.takeLast(8) to "shortMAC"
 +}
 +
 +/** Small JSON boundary over immutable maps/lists; Android's JSON implementation is not required by JVM tests. */
@@ -531,10 +590,10 @@ index ec1ab859..b89ce8b7 100644
                      if (it == null) active.remove(downstream, this@RoutingManager)
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
 new file mode 100644
-index 00000000..64fff121
+index 00000000..3d6e5491
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,451 @@
 +package be.mygod.vpnhotspot
 +
 +import android.net.MacAddress
@@ -544,6 +603,8 @@ index 00000000..64fff121
 +import android.os.SystemClock
 +import be.mygod.vpnhotspot.root.RootManager
 +import be.mygod.vpnhotspot.root.WebListener
++import be.mygod.vpnhotspot.root.TetheringCommands
++import kotlinx.collections.immutable.toPersistentList
 +import be.mygod.vpnhotspot.client.Client
 +import be.mygod.vpnhotspot.client.ClientAddressInfo
 +import be.mygod.vpnhotspot.room.AppDatabase
@@ -570,6 +631,7 @@ index 00000000..64fff121
 +import kotlinx.coroutines.Job
 +import kotlinx.coroutines.SupervisorJob
 +import kotlinx.coroutines.currentCoroutineContext
++import kotlinx.coroutines.isActive
 +import kotlinx.coroutines.async
 +import kotlinx.coroutines.delay
 +import kotlinx.coroutines.flow.collect
@@ -646,6 +708,7 @@ index 00000000..64fff121
 +        @Volatile var vpn: Map<String, Any?>? = null
 +        @Volatile var primary: Map<String, Any?>? = null
 +        @Volatile var fallback: Map<String, Any?>? = null
++        @Volatile var hostnames = DashboardHostnames(if (Build.VERSION.SDK_INT >= 30) "waiting" else "unsupported")
 +        @Volatile var names: Map<String, String> = emptyMap()
 +        @Volatile var errors: List<Map<String, Any?>> = emptyList()
 +        @Synchronized fun error(source: String, message: String) {
@@ -687,6 +750,34 @@ index 00000000..64fff121
 +                    session.neighbours.invalidate()
 +                    snapshot.unavailableReason?.let { session.error("neighbours", it) }
 +                }
++            }
++        }
++        // Session-owned, not clientsScreenObserver-owned: no ViewModel or foreground traffic subscription.
++        // Each session collects the same cold source as the App; cancellation unregisters its callback.
++        val hostnamesJob = connectionScope.launch {
++            if (Build.VERSION.SDK_INT < 30) return@launch
++            try {
++                RootManager.use { server ->
++                    server.flow(TetheringCommands.ClientsFlow()).collect { event ->
++                        val addresses = event.clients.flatMap { client ->
++                            client.addresses.map { address -> DashboardHostnameAddress(
++                                client.macAddress.toString(), TetherType.fromTetheringType(client.tetheringType).name,
++                                address.address.address.hostAddress.orEmpty(), address.hostname,
++                            ) }
++                        }.toPersistentList()
++                        session.hostnames = DashboardHostnames("available", addresses, System.currentTimeMillis())
++                    }
++                }
++                session.hostnames = DashboardHostnames("unavailable")
++            } catch (e: CancellationException) {
++                throw e
++            } catch (e: Exception) {
++                session.hostnames = DashboardHostnames("error")
++                Timber.w(e, "Dashboard system hostnames unavailable")
++                session.error("system_hostnames", e.toString())
++            } finally {
++                if (!currentCoroutineContext().isActive || !session.resources.active)
++                    session.hostnames = DashboardHostnames("stopped")
 +            }
 +        }
 +        val namesJob = connectionScope.launch {
@@ -771,6 +862,8 @@ index 00000000..64fff121
 +            fallbackJob.cancel()
 +            neighbourJob.cancel()
 +            namesJob.cancel()
++            hostnamesJob.cancel()
++            session.hostnames = DashboardHostnames("stopped")
 +            synchronized(lifecycleLock) {
 +                // Identity matters: a late finally never touches a replacement generation.
 +                if (sessions[iface] === session) sessions.remove(iface)
@@ -832,15 +925,37 @@ index 00000000..64fff121
 +                    active = true
 +            }
 +        } }
++        val hostnameSnapshot = session.hostnames
++        // Never attach a name via MAC alone or via stale neighbours. Include all downstreams so
++        // overlapping MAC/IP/type tuples cannot accidentally borrow another interface's hostname.
++        val locations = if (!observed.available) emptyList() else observed.value?.let { value ->
++            value.neighbours.mapNotNull { neighbour ->
++                val mac = neighbour.lladdr ?: return@mapNotNull null
++                val downstream = value.bridgeMasterByMember[neighbour.dev] ?: neighbour.dev
++                DashboardClientLocation(mac.toString(),
++                    (if (downstream == iface) type else TetherType.ofInterface(downstream)).name,
++                    neighbour.ip.hostAddress.orEmpty(), downstream)
++            }
++        }.orEmpty()
 +        val clients = grouped.toSortedMap().map { (mac, client) ->
 +            val total = sample.totals[mac]
 +            val rate = sample.rates[mac]
 +            val dns = snapshot?.dnsPackets?.get(mac)
-+            val nickname = session.names[mac]?.takeIf { it.isNotBlank() }
++            val hostnames = dashboardHostnames(hostnameSnapshot, locations, iface, mac)
++            val name = dashboardClientName(mac, session.names[mac], hostnames, association?.get(mac))
 +            mapOf(
-+                "mac" to mac, "name" to (nickname ?: association?.get(mac)?.takeIf { it.isNotBlank() }),
-+                "nameSource" to (if (nickname != null) "ClientRecord" else if (!association?.get(mac).isNullOrBlank())
-+                    "RepeaterService.group" else null),
++                "mac" to mac, "name" to name.first, "nameSource" to name.second,
++                "hostnames" to hostnames.map { it.hostname }.distinct(),
++                "hostnameSource" to "TetheringManagerCompat.ClientsChanged",
++                "hostnameAddresses" to hostnames.map { mapOf("ip" to it.ip, "hostname" to it.hostname,
++                    "type" to it.type, "downstream" to iface) },
++                "hostnameStatus" to when {
++                    hostnameSnapshot.status != "available" -> hostnameSnapshot.status
++                    !observed.available -> "unavailable"
++                    hostnames.isEmpty() -> "empty"
++                    else -> "available"
++                },
++                "hostnameChangedAt" to hostnameSnapshot.changedAt,
 +                "interface" to iface, "interfaces" to client.ifaces.toList(), "type" to client.type.name,
 +                "ips" to client.ip.keys.map { it.hostAddress },
 +                "ipv4" to client.ip.keys.filterIsInstance<Inet4Address>().map { it.hostAddress },
@@ -883,6 +998,8 @@ index 00000000..64fff121
 +            "diagnostics" to mapOf(
 +                // Counter replies may omit failed sources; they cannot establish daemon-wide health.
 +                "daemon" to null,
++                "hostnameObservation" to mapOf("status" to hostnameSnapshot.status,
++                    "changedAt" to hostnameSnapshot.changedAt, "addressCount" to hostnameSnapshot.addresses.size),
 +                "counterObservation" to (if (sample.available) "recorder_reply_observed" else "unavailable"),
 +                "counterSampledAt" to snapshot?.wallTime?.takeIf { it != 0L },
 +                "counterAgeMillis" to snapshot?.let { (now - it.at).coerceAtLeast(0) },

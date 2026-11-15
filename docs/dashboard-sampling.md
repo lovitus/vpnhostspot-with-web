@@ -63,13 +63,25 @@ the publication boundary and source wiring, not Android Room integration or real
 daemon transport latency. Existing HTTP/deadline/lifecycle, source-churn/reset,
 row-liveness and frontend failure-retention coverage remains.
 
+## Local-only client UI verification
+
+`tests/dashboard_dom.cjs PATCHED_SOURCE` (Node + jsdom 26) executes the production
+HTML/JavaScript with the same fixtures as the Playwright suite; it covers capsule
+switching, All, independent/all expansion through polling, keyed focus, selected
+client removal, failure retention and hostile hostname text. It does not measure
+layout or scrolling. `tests/dashboard_browser.cjs` remains the real-browser check
+for mobile width, capsule scrolling, focus/scroll preservation and exact JSON export.
+The JVM helper suite adds hostname precedence, exact source matching, ambiguity,
+empty/error/restart and multi-address checks. Python lifecycle tests assert the
+session-owned callback wiring and prohibit foreground traffic subscriptions.
+
 ## Schema 3 coverage and sources
 
 | Fields | Existing authority and limits |
 | --- | --- |
 | Downstream, actual gateway, port, session uptime | Existing RoutingManager lifecycle, interface IPv4 selection, monotonic dashboard creation time; HTTP remains app-owned port 8080 |
 | Client MAC, IPv4/IPv6, source interfaces, address states | NetlinkNeighbour.monitorSnapshots, including bridgeMasterByMember; Client and ClientAddressInfo adapt rows using existing grouping semantics. A valid neighbour is not proof of a current Wi-Fi association |
-| Name | ClientRecord.Dao.lookupOrDefaultFlow nickname, then existing P2P deviceName; no hostname/MAC lookup requests, database writes, Activity or ViewModel |
+| Name | Saved ClientRecord nickname > system addresses[].hostname > P2P deviceName > short MAC. A per-dashboard-session RootManager.use / TetheringCommands.ClientsFlow subscription consumes the same Android >=30 TetheringManagerCompat.ClientsChanged source as ClientViewModel, independent of Activity. No ViewModel, foregroundUpdates subscription, network lookup or database writes |
 | P2P association/online state and count | RepeaterService.updateGroup publishes only interface, MAC and deviceName to the adapter, including null on teardown. Group credentials are not retained or exported. Other Wi-Fi association sources remain unavailable rather than being inferred from neighbours |
 | Per-client and aggregate bytes/s and bytes | Existing recorder-owned raw publications converted by TrafficRecorder.counterKey; original per-session delta adapter with explicit observation window. Totals survive retired sources and failed reads. Unavailable/first rate baselines stay null. Aggregate includes retained session totals, not only currently visible rows |
 | Last traffic change | Existing sampled counter delta greater than zero; milliseconds since that observation. It is not an exact last-packet or last-user-activity timestamp |
@@ -86,12 +98,39 @@ daemon command or protocol fields were added to fill those metrics. The monitor
 availability addition is a JVM-side observation lifecycle signal; it changes no
 daemon lifecycle, routing, firewall or root cleanup side effects.
 
-Frontend publication is atomic: check HTTP status, parse and validate the payload,
-build the entire replacement offscreen, then replace the displayed snapshot.
+System names are published as immutable value snapshots (persistent lists, copied strings),
+not framework callback objects. Each session owns its cold callback subscription;
+stop/cancellation unregisters through the existing ClientsFlow cleanup and clears
+its snapshot, and restart begins at waiting (unsupported below API 30). No retry
+loop or new root command is introduced. Successful empty callbacks replace old
+names; waiting, unsupported, unavailable, error and empty are distinct. Source
+errors are reported in recentErrors and do not stop the listener. No stale names
+are retained after errors or neighbour invalidation. App and Web share the source
+contract, not an Activity/ViewModel or a global cache.
+
+Schema 3 is additive: clients now include hostnames, hostnameSource,
+hostnameAddresses (IP/hostname/type/downstream), hostnameStatus and hostnameChangedAt.
+A name requires an exact MAC + actual current neighbour IP + compatible TetherType
+(NCM accepts USB) match on exactly one canonical downstream. Bridge members use
+bridgeMasterByMember; ambiguous overlapping downstream tuples are not named.
+ClientsChanged has no interface identifier: unknown types, missing addresses,
+stale neighbours and ambiguous matches intentionally fall back. Saved nicknames
+still win but do not hide the system names in details. Android API33 can deliver
+this callback, yet the OS/ROM or P2P may omit hostnames; no vendor-based invention
+or guarantee that a callback contains a hostname is made.
+
+Frontend publication checks HTTP status, parses and validates the payload,
+builds the next snapshot offscreen, then reconciles keyed existing DOM nodes.
 HTTP errors, invalid JSON, partial rows, aborted fetches and rendering errors leave
 the last successful rows and JSON intact with an explicit error banner. Source
 availability is independent of HTTP success; unavailable observations remain
-clearly labelled. Details expansion survives refreshes. All names and errors use
+clearly labelled. The default All capsule shows separate compact client cards,
+not a traffic aggregation; other capsules select by MAC. Individual details and
+expand-all/collapse-all apply to all cards (including hidden cards). Selection,
+expansion, focused nodes and capsule scroll survive one-second polling. Removing
+the selected MAC falls back to All; a returning removed MAC starts collapsed.
+Existing global traffic totals and diagnostics are not filtered by selection.
+All names and errors use
 textContent, and all assets remain local under the existing restrictive CSP.
 
 The hosted production-helper suite covers silence beyond three seconds, explicit

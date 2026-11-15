@@ -141,6 +141,25 @@ class DashboardWiringTest(unittest.TestCase):
         self.assertNotIn("AppDatabase", status)
         self.assertNotIn("Services.connectivity", status)
 
+    def test_hostname_subscription_is_session_owned_and_does_not_enable_foreground_recording(self):
+        self.assertIn('if (Build.VERSION.SDK_INT < 30) return@launch', self.web)
+        self.assertIn('server.flow(TetheringCommands.ClientsFlow()).collect', self.web)
+        self.assertIn('address.address.address.hostAddress', self.web)
+        self.assertIn('address.hostname', self.web)
+        self.assertIn('}.toPersistentList()', self.web)
+        self.assertIn('hostnamesJob.cancel()', self.web)
+        self.assertIn('DashboardHostnames("stopped")', self.web)
+        self.assertIn('DashboardHostnames("error")', self.web)
+        self.assertIn('DashboardHostnames("unavailable")', self.web)
+        self.assertNotIn('ClientViewModel(', self.web)
+        self.assertNotIn('TrafficRecorder.foregroundUpdates', self.web)
+        status = self.web[self.web.index('private fun status('):self.web.index('private fun upstreamJson')]
+        self.assertIn('if (!observed.available) emptyList()', status)
+        self.assertIn('dashboardHostnames(hostnameSnapshot, locations, iface, mac)', status)
+        self.assertIn('"hostnameStatus"', status)
+        self.assertIn('"schema" to 3', status)
+        self.assertNotIn('RootManager.use', status)
+
     def test_monitor_has_explicit_lifecycle_invalidation(self):
         monitor = (Path(os.environ['VPNHOTSPOT_SOURCE']) /
             'mobile/src/main/java/be/mygod/vpnhotspot/net/NetlinkNeighbour.kt').read_text()

@@ -199,6 +199,38 @@ fun main() = runBlocking {
         check(!observed.peek().available) // old generation cannot populate its replacement
         println("PASS silent neighbours survive >3 seconds; deletion, invalidation and restart")
     }
+    if (mode == "all" || mode == "hostnames") {
+        val mac = "02:00:00:00:00:01"
+        val address = DashboardHostnameAddress(mac, "WIFI", "192.0.2.2", "<img onerror=alert(1)>")
+        val location = DashboardClientLocation(mac, "WIFI", address.ip, "wlan0")
+        val source = DashboardHostnames("available", listOf(address), 1000)
+        val names = dashboardHostnames(source, listOf(location), "wlan0", mac)
+        check(names == listOf(address))
+        check(dashboardClientName(mac, "saved", names, "p2p") == ("saved" to "ClientRecord"))
+        check(dashboardClientName(mac, "  ", names, "p2p").first == address.hostname)
+        check(dashboardClientName(mac, null, emptyList(), "p2p").second == "RepeaterService.group")
+        check(dashboardClientName(mac, null, emptyList(), " ") == ("00:00:01" to "shortMAC"))
+        for (wrong in listOf(location.copy(mac = "other"), location.copy(ip = "192.0.2.3"),
+                location.copy(type = "USB"), location.copy(downstream = "wlan1")))
+            check(dashboardHostnames(source, listOf(wrong), "wlan0", mac).isEmpty())
+        check(dashboardHostnames(source, listOf(location, location.copy(downstream = "wlan1")),
+            "wlan0", mac).isEmpty()) // ambiguous MAC/IP/type on two downstreams
+        check(dashboardHostnames(source, listOf(location, location), "wlan0", mac) == names) // bridge dedup
+        for (state in listOf("waiting", "unavailable", "error", "unsupported", "stopped"))
+            check(dashboardHostnames(source.copy(status = state), listOf(location), "wlan0", mac).isEmpty())
+        check(dashboardHostnames(source.copy(addresses = emptyList()), listOf(location), "wlan0", mac).isEmpty())
+        check(dashboardHostnames(source.copy(addresses = listOf(address.copy(hostname = " "))),
+            listOf(location), "wlan0", mac).isEmpty())
+        check(dashboardHostnames(source.copy(addresses = listOf(address.copy(type = "USB"))),
+            listOf(location.copy(type = "NCM")), "wlan0", mac).size == 1)
+        check(dashboardHostnames(DashboardHostnames(), listOf(location), "wlan0", mac).isEmpty())
+        check(dashboardHostnames(source, emptyList(), "wlan0", mac).isEmpty()) // removed/stale neighbours
+        check(dashboardHostnames(source.copy(addresses = listOf(address.copy(type = "NONE"))),
+            listOf(location.copy(type = "NONE")), "wlan0", mac).isEmpty())
+        check(dashboardHostnames(source.copy(addresses = listOf(address, address.copy(ip = "2001:db8::2",
+            hostname = "second"))), listOf(location, location.copy(ip = "2001:db8::2")), "wlan0", mac).size == 2)
+        println("PASS hostname precedence, exact MAC/IP/type/downstream, ambiguity, empty/error/restart and multi-address")
+    }
     if (mode == "all" || mode == "traffic") {
         val samples = DashboardTraffic()
         val a = DashboardTraffic.Counter("a", "mac", 100, 200)
