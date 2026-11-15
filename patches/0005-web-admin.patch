@@ -114,6 +114,45 @@ index 00000000..31426ffa
 +        }
 +    }
 +}
+diff --git a/mobile/src/androidTest/java/be/mygod/vpnhotspot/ui/apconfiguration/VendorDataTest.kt b/mobile/src/androidTest/java/be/mygod/vpnhotspot/ui/apconfiguration/VendorDataTest.kt
+index 47c2c3ab..bfb82ff7 100644
+--- a/mobile/src/androidTest/java/be/mygod/vpnhotspot/ui/apconfiguration/VendorDataTest.kt
++++ b/mobile/src/androidTest/java/be/mygod/vpnhotspot/ui/apconfiguration/VendorDataTest.kt
+@@ -1,8 +1,9 @@
+ package be.mygod.vpnhotspot.ui.apconfiguration
+ 
++import android.net.wifi.OuiKeyedData
+ import android.os.Build
+ import android.os.PersistableBundle
+-import be.mygod.vpnhotspot.net.wifi.OuiKeyedData
++import be.mygod.vpnhotspot.net.wifi.VendorData
+ import org.junit.Assert.assertArrayEquals
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertThrows
+@@ -19,9 +20,9 @@ class VendorDataTest {
+     @Test
+     fun roundTripPreservesOrderAndDuplicateOui() {
+         val source = listOf(
+-            OuiKeyedData(0x00aabb, PersistableBundle().apply { putString("first", "value") }),
+-            OuiKeyedData(0x00aabb, PersistableBundle().apply { putInt("second", 2) }),
+-            OuiKeyedData(0x00aacc, PersistableBundle().apply { putBoolean("third", true) }),
++            OuiKeyedData.Builder(0x00aabb, PersistableBundle().apply { putString("first", "value") }).build(),
++            OuiKeyedData.Builder(0x00aabb, PersistableBundle().apply { putInt("second", 2) }).build(),
++            OuiKeyedData.Builder(0x00aacc, PersistableBundle().apply { putBoolean("third", true) }).build(),
+         )
+ 
+         val parsed = VendorData.deserialize(VendorData.serialize(source))
+@@ -54,7 +55,9 @@ class VendorDataTest {
+             putIntArray("ints", intArrayOf(1, 2, 3))
+         }
+ 
+-        val parsed = VendorData.deserialize(VendorData.serialize(listOf(OuiKeyedData(0x00aabb, source)))).single()
++        val parsed = VendorData.deserialize(
++            VendorData.serialize(listOf(OuiKeyedData.Builder(0x00aabb, source).build())),
++        ).single()
+ 
+         assertEquals("a\nb\rc\td < &", parsed.data.getString("text"))
+         assertArrayEquals(intArrayOf(1, 2, 3), parsed.data.getIntArray("ints"))
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt
 new file mode 100644
 index 00000000..db159baf
