@@ -24,7 +24,7 @@ No SELinux policy, iptables rule, BPF map, UID-wide VPN exemption or persistent 
 
 ## API and validation
 
-Uses public Android 29 APIs: Os socket/accept/connect/read/write/fcntlInt/getsockoptInt/shutdown, ParcelFileDescriptor.dup strictly inside root, MessageQueue FD readiness, and ordinary ServerSocket/Socket. Linux SO_MARK option 36 remains the existing documented AOSP compatibility dependency; a failed mark is not silently ignored.
+Uses public Android 29 APIs: Os socket/accept/connect/read/write/fcntlInt/shutdown, ParcelFileDescriptor.dup strictly inside root, MessageQueue FD readiness, and ordinary ServerSocket/Socket. Linux SO_MARK option 36 remains the existing documented AOSP compatibility dependency; a failed mark is not silently ignored.
 
 CI replays the exact patch, compiles production Kotlin/Rust, executes JVM, Android 29 socket, browser and DNS/counter regressions. Android tests cover authenticated loopback byte framing, trusted numeric Host, rejection of private-address Host, response I/O and stop/deadline interruption. They do **not** claim cross-domain SELinux or VPN device coverage. Device acceptance separately requires enforcing SELinux with VPN on, numeric gateway homepage/status/debug, invalid Host, slow clients, FD stability, private authentication and local access. The old emulator Binder/PFD tests were removed because they tested the rejected architecture.
 
