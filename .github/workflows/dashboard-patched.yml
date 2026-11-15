@@ -42,7 +42,11 @@ jobs:
       - uses: android-actions/setup-android@v4
       - uses: gradle/actions/setup-gradle@v6
       - name: Install SDK packages on hosted runner
-        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "ndk;29.0.14206865"
+        run: |
+          sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "ndk;29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+          cargo install cargo-ndk --version 4.1.2 --locked
       - name: Compile and run Android JVM unit tests on patched source
         working-directory: patched
         run: ./gradlew :mobile:compileDebugKotlin :mobile:testDebugUnitTest --no-daemon --console=plain
