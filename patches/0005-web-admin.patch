@@ -1061,7 +1061,7 @@ index 22a174cb..0491a16c 100644
      /**
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/root/WebListener.kt b/mobile/src/main/java/be/mygod/vpnhotspot/root/WebListener.kt
 new file mode 100644
-index 00000000..94aac86b
+index 00000000..63306543
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/root/WebListener.kt
 @@ -0,0 +1,187 @@
@@ -1181,8 +1181,8 @@ index 00000000..94aac86b
 +                else queue.addOnFileDescriptorEventListener(fd.fileDescriptor, mask) { _, event ->
 +                    try {
 +                        if (connecting && !externalSide) {
-+                            val error = Os.getsockoptInt(local.fileDescriptor, OsConstants.SOL_SOCKET, OsConstants.SO_ERROR)
-+                            if (error != 0) throw ErrnoException("relay connect", error)
++                            // The first nonblocking write below reports failed connects without
++                            // hidden getsockopt APIs; no HTTP bytes are read before the capability.
 +                            connecting = false
 +                        }
 +                        // Drain readable data before processing HUP, preserving the final response.
