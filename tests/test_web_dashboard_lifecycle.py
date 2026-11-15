@@ -36,7 +36,16 @@ class DashboardWiringTest(unittest.TestCase):
                          "RoutingManager never starts the dashboard")
 
     def test_dashboard_listener_is_bounded_and_read_only(self):
-        self.assertIn("ServerSocket(PORT, 16, address)", self.web)
+        root = (Path(os.environ['VPNHOTSPOT_SOURCE']) /
+            'mobile/src/main/java/be/mygod/vpnhotspot/root/WebListener.kt').read_text()
+        self.assertIn('Os.bind(listener.fileDescriptor, address, 8080)', root)
+        self.assertIn('Os.accept(listener.fileDescriptor, null)', root)
+        self.assertLess(root.index('36, 0x00030063'), root.index('Os.listen('))
+        self.assertIn('RootFlow<ParcelableBoolean>', root)
+        self.assertIn('receiver.transact(DELIVER, data, reply, 0)', root)
+        self.assertIn('Binder.getCallingUid() == 0', self.web)
+        self.assertIn('worker.invokeOnCompletion', self.web)
+        self.assertNotIn('ServerSocket(', self.web)
         self.assertIn("MAX_HEADERS = 64", self.core)
         self.assertIn("sockets.size >= 16", self.core)
         self.assertIn('request.method != "GET"', self.web)

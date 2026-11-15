@@ -2,7 +2,7 @@ name: Dashboard patched source
 
 on:
   push:
-    branches: [master, agent/web-review-fixes, agent/web-lock-fix, agent/integrated-final, agent/dashboard-complete]
+    branches: [master, agent/web-review-fixes, agent/web-lock-fix, agent/integrated-final, agent/dashboard-complete, agent/web-device-fix]
   workflow_dispatch:
 
 permissions:
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   verify:
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/agent/web-review-fixes' || github.ref == 'refs/heads/agent/web-lock-fix' || github.ref == 'refs/heads/agent/integrated-final' || github.ref == 'refs/heads/agent/dashboard-complete'
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/agent/web-review-fixes' || github.ref == 'refs/heads/agent/web-lock-fix' || github.ref == 'refs/heads/agent/integrated-final' || github.ref == 'refs/heads/agent/dashboard-complete' || github.ref == 'refs/heads/agent/web-device-fix'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -46,6 +46,19 @@ jobs:
       - name: Compile and run Android JVM unit tests on patched source
         working-directory: patched
         run: ./gradlew :mobile:compileDebugKotlin :mobile:testDebugUnitTest --no-daemon --console=plain
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Exercise production accepted-FD adapter on Android
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          arch: x86_64
+          disable-animations: true
+          working-directory: patched
+          script: ./gradlew :mobile:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=be.mygod.vpnhotspot.DashboardSocketTest --no-daemon --console=plain
       - name: Execute production Kotlin behavior tests
         env:
           DASHBOARD_PAGE_OUTPUT: ${{ runner.temp }}/dashboard.html

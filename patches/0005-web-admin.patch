@@ -1,3 +1,23 @@
+diff --git a/README.md b/README.md
+index 68ca4b9b..d7dcffa1 100644
+--- a/README.md
++++ b/README.md
+@@ -246,8 +246,13 @@ Other:
+   That fallback is expected on only kernels without effective `FRA_IP_PROTO` policy-rule support, which upstream Linux added in 4.17.
+   Probe cleanup deletes at most one rule, omitting `FRA_IP_PROTO` when support or
+   the mutation outcome is uncertain; repeated stale-rule deletion is reserved for Clean.
+-* Daemon reply sockets use the AOSP local-network protected mark `0x00030063`, which assumes
+-  `LOCAL_NET_ID = 99` plus the `explicitlySelected` and `protectedFromVpn` fwmark bits.
++* Daemon reply sockets and the root-owned dashboard listener use the AOSP local-network protected
++  mark `0x00030063`, which assumes `LOCAL_NET_ID = 99` plus the `explicitlySelected` and
++  `protectedFromVpn` fwmark bits. The dashboard requires root creation **and accept** to avoid
++  app-UID VPN ingress filtering. Its private Binder endpoint passes accepted sockets to the app;
++  ROM SELinux must permit this FD transfer and app I/O. Stop/Clean closes the listener and shuts
++  down accepted sockets in both owners; no persistent firewall or routing state is added.
++  A bind, marking or IPC failure leaves the dashboard unavailable and is reported explicitly.
+ 
+ System/root command assumptions:
+ 
 diff --git a/docs/vpnhotspotd/dns.md b/docs/vpnhotspotd/dns.md
 index f7218955..527809e4 100644
 --- a/docs/vpnhotspotd/dns.md
@@ -24,16 +44,86 @@ index f7218955..527809e4 100644
  DNS queries are sent through bionic's Android resolver API:
  
  - `android_res_nsend` starts a one-shot query on the selected Android network;
+diff --git a/mobile/src/androidTest/java/be/mygod/vpnhotspot/DashboardSocketTest.kt b/mobile/src/androidTest/java/be/mygod/vpnhotspot/DashboardSocketTest.kt
+new file mode 100644
+index 00000000..31426ffa
+--- /dev/null
++++ b/mobile/src/androidTest/java/be/mygod/vpnhotspot/DashboardSocketTest.kt
+@@ -0,0 +1,64 @@
++package be.mygod.vpnhotspot
++
++import android.os.ParcelFileDescriptor
++import androidx.test.ext.junit.runners.AndroidJUnit4
++import org.junit.Assert.*
++import org.junit.Test
++import org.junit.runner.RunWith
++import java.io.IOException
++import java.net.InetAddress
++import java.net.ServerSocket
++import java.net.Socket
++import java.util.concurrent.Executors
++import java.util.concurrent.TimeUnit
++
++/** Exercises the production adapter on Android, using real TCP descriptors, not framework mocks. */
++@RunWith(AndroidJUnit4::class)
++class DashboardSocketTest {
++    @Test fun acceptedDescriptorPreservesHttpHostAndResponse() {
++        val address = InetAddress.getByName("127.0.0.1")
++        ServerSocket(0, 1, address).use { listener ->
++            Socket(address, listener.localPort).use { client ->
++                listener.accept().use { accepted ->
++                    DashboardSocket(ParcelFileDescriptor.fromSocket(accepted), address).use { delegated ->
++                        client.getOutputStream().write("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n\r\n".toByteArray())
++                        assertEquals("/api/status", DashboardHttp.read(delegated,
++                            System.nanoTime() + TimeUnit.SECONDS.toNanos(3))?.path)
++                        delegated.getOutputStream().write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".toByteArray())
++                        client.soTimeout = 1000
++                        assertEquals('H'.code, client.getInputStream().read())
++                    }
++                }
++            }
++        }
++    }
++
++    @Test fun stopAndDeadlineInterruptDelegatedReadEvenWithRootDuplicate() {
++        for (deadline in listOf(false, true)) {
++            val address = InetAddress.getByName("127.0.0.1")
++            ServerSocket(0, 1, address).use { listener ->
++                Socket(address, listener.localPort).use { client ->
++                    listener.accept().use { rootCopy ->
++                        val socket = DashboardSocket(ParcelFileDescriptor.fromSocket(rootCopy), address)
++                        val resources = DashboardSession()
++                        assertTrue(resources.attach(socket))
++                        val worker = Executors.newSingleThreadExecutor()
++                        try {
++                            val blocked = worker.submit<Boolean> {
++                                try { socket.getInputStream().read() == -1 } catch (_: IOException) { true }
++                            }
++                            if (deadline) DashboardDeadline.arm(socket, 50) else resources.stop()
++                            assertTrue(blocked.get(2, TimeUnit.SECONDS))
++                            resources.stop()
++                            val late = DashboardSocket(ParcelFileDescriptor.fromSocket(rootCopy), address)
++                            assertFalse(resources.attach(late))
++                            assertFalse(resources.active)
++                            client.soTimeout = 1000
++                            assertEquals(-1, client.getInputStream().read())
++                        } finally { worker.shutdownNow(); resources.stop() }
++                    }
++                }
++            }
++        }
++    }
++}
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt
 new file mode 100644
-index 00000000..5e6899cc
+index 00000000..db159baf
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardCore.kt
 @@ -0,0 +1,166 @@
 +package be.mygod.vpnhotspot
 +
 +import java.io.ByteArrayOutputStream
-+import java.net.ServerSocket
++import java.io.Closeable
 +import java.net.Socket
 +import java.util.concurrent.ScheduledThreadPoolExecutor
 +import java.util.concurrent.TimeUnit
@@ -42,10 +132,10 @@ index 00000000..5e6899cc
 +internal class DashboardSession {
 +    @Volatile var active = true
 +        private set
-+    private var listener: ServerSocket? = null
++    private var listener: Closeable? = null
 +    private val sockets = HashSet<Socket>()
 +
-+    @Synchronized fun publish(candidate: ServerSocket): Boolean {
++    @Synchronized fun publish(candidate: Closeable): Boolean {
 +        if (!active) { candidate.close(); return false }
 +        listener = candidate
 +        return true
@@ -71,7 +161,7 @@ index 00000000..5e6899cc
 +    private val timer = ScheduledThreadPoolExecutor(1) { runnable ->
 +        Thread(runnable, "dashboard-deadlines").apply { isDaemon = true }
 +    }.apply { removeOnCancelPolicy = true }
-+    fun arm(socket: Socket, milliseconds: Long) = timer.schedule({ socket.close() }, milliseconds, TimeUnit.MILLISECONDS)
++    fun arm(socket: Closeable, milliseconds: Long) = timer.schedule({ socket.close() }, milliseconds, TimeUnit.MILLISECONDS)
 +}
 +
 +internal object DashboardHttp {
@@ -314,6 +404,45 @@ index 00000000..843c8bae
 +    is Iterable<*> -> value.joinToString(",", "[", "]", transform = ::dashboardJson)
 +    else -> error("Unsupported dashboard JSON value: ${value.javaClass}")
 +}
+diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/DashboardSocket.kt b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardSocket.kt
+new file mode 100644
+index 00000000..6904804b
+--- /dev/null
++++ b/mobile/src/main/java/be/mygod/vpnhotspot/DashboardSocket.kt
+@@ -0,0 +1,33 @@
++package be.mygod.vpnhotspot
++
++import android.os.ParcelFileDescriptor
++import android.system.ErrnoException
++import android.system.Os
++import android.system.OsConstants
++import android.system.StructTimeval
++import java.io.IOException
++import java.net.InetAddress
++import java.net.Socket
++
++/** Public PFD streams over a root-accepted TCP socket. No hidden Socket(FileDescriptor) constructor. */
++internal class DashboardSocket(private val descriptor: ParcelFileDescriptor, private val gateway: InetAddress) : Socket() {
++    private val input = ParcelFileDescriptor.AutoCloseInputStream(descriptor)
++    private val output = ParcelFileDescriptor.AutoCloseOutputStream(descriptor)
++    private var closed = false
++    override fun getInputStream() = input
++    override fun getOutputStream() = output
++    override fun getLocalAddress() = gateway
++    override fun setSoTimeout(timeout: Int) {
++        try { Os.setsockoptTimeval(descriptor.fileDescriptor, OsConstants.SOL_SOCKET,
++            OsConstants.SO_RCVTIMEO, StructTimeval.fromMillis(timeout.toLong())) }
++        catch (e: ErrnoException) { throw IOException(e) }
++    }
++    @Synchronized override fun close() {
++        if (closed) return
++        closed = true
++        try {
++            try { Os.shutdown(descriptor.fileDescriptor, OsConstants.SHUT_RDWR) }
++            catch (e: ErrnoException) { if (e.errno != OsConstants.ENOTCONN) throw IOException(e) }
++        } finally { descriptor.close() }
++    }
++}
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/RepeaterService.kt b/mobile/src/main/java/be/mygod/vpnhotspot/RepeaterService.kt
 index e3f54850..bac89973 100644
 --- a/mobile/src/main/java/be/mygod/vpnhotspot/RepeaterService.kt
@@ -356,17 +485,23 @@ index ec1ab859..b89ce8b7 100644
                      if (it == null) active.remove(downstream, this@RoutingManager)
 diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
 new file mode 100644
-index 00000000..07d53d13
+index 00000000..f7bf3b0a
 --- /dev/null
 +++ b/mobile/src/main/java/be/mygod/vpnhotspot/WebAdmin.kt
-@@ -0,0 +1,373 @@
+@@ -0,0 +1,413 @@
 +package be.mygod.vpnhotspot
 +
 +import android.net.MacAddress
 +import android.net.NetworkCapabilities
 +import android.net.wifi.p2p.WifiP2pGroup
++import android.os.Binder
++import android.os.IBinder
++import android.os.Parcel
++import android.os.ParcelFileDescriptor
 +import android.os.Build
 +import android.os.SystemClock
++import be.mygod.vpnhotspot.root.RootManager
++import be.mygod.vpnhotspot.root.WebListener
 +import be.mygod.vpnhotspot.client.Client
 +import be.mygod.vpnhotspot.client.ClientAddressInfo
 +import be.mygod.vpnhotspot.room.AppDatabase
@@ -393,19 +528,19 @@ index 00000000..07d53d13
 +import kotlinx.coroutines.Job
 +import kotlinx.coroutines.SupervisorJob
 +import kotlinx.coroutines.currentCoroutineContext
++import kotlinx.coroutines.async
 +import kotlinx.coroutines.delay
 +import kotlinx.coroutines.flow.collect
 +import kotlinx.coroutines.launch
 +import timber.log.Timber
++import java.io.Closeable
 +import java.io.IOException
 +import java.net.Inet4Address
 +import java.net.NetworkInterface
-+import java.net.ServerSocket
 +import java.net.Socket
 +import java.net.SocketException
-+import java.net.SocketTimeoutException
 +
-+/** Read-only HTTP in the unprivileged app process; no routing or root authority. */
++/** HTTP and observations stay in the app; the fixed root entry delegates accepted TCP descriptors. */
 +object WebAdmin {
 +    private const val PORT = 8080
 +    private const val REQUEST_DEADLINE_MS = 3000L
@@ -535,37 +670,71 @@ index 00000000..07d53d13
 +            while (session.resources.active) {
 +                val address = gatewayAddress(iface) ?: run { delay(500); continue }
 +                try {
-+                    ServerSocket(PORT, 16, address).use { candidate ->
-+                        if (!session.resources.publish(candidate)) return@use
++                    RootManager.use { server -> kotlinx.coroutines.supervisorScope {
 +                        session.gateway = address.hostAddress.orEmpty()
-+                        candidate.soTimeout = 1000 // recheck the interface address during idle periods
-+                        while (session.resources.active && gatewayAddress(iface) == address) {
-+                            val socket = try { candidate.accept() } catch (_: SocketTimeoutException) { continue }
-+                            if (!session.resources.attach(socket)) continue
-+                            // Start the absolute deadline before queueing the worker; includes response writes.
-+                            val deadline = DashboardDeadline.arm(socket, REQUEST_DEADLINE_MS)
-+                            connectionScope.launch {
++                        val receiver = object : Binder() {
++                            override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
++                                if (code != WebListener.DELIVER) return super.onTransact(code, data, reply, flags)
++                                check(Binder.getCallingUid() == 0) { "Only the root entry may deliver sockets" }
++                                data.enforceInterface(WebListener.DESCRIPTOR)
++                                val descriptor = ParcelFileDescriptor.CREATOR.createFromParcel(data)
++                                var owned = false
 +                                try {
-+                                    handle(socket, iface, session)
-+                                } catch (_: IOException) {
-+                                    // A client disconnect/absolute deadline affects only this exchange.
-+                                } finally {
-+                                    deadline.cancel(false)
-+                                    socket.close()
-+                                    session.resources.detach(socket)
-+                                }
++                                    val completion = checkNotNull(data.readStrongBinder())
++                                    val socket = DashboardSocket(descriptor, address)
++                                    // Synchronous delivery never queues a PFD in RootFlow. Even a late
++                                    // callback sees this generation inactive and closes before returning.
++                                    if (session.resources.attach(socket)) {
++                                        owned = true
++                                        val deadline = DashboardDeadline.arm(socket, REQUEST_DEADLINE_MS)
++                                        val worker = connectionScope.launch {
++                                            try { handle(socket, iface, session) }
++                                            catch (_: IOException) { /* disconnect or deadline */ }
++                                        }
++                                        // Also runs if cancellation wins before the worker ever starts.
++                                        worker.invokeOnCompletion {
++                                            deadline.cancel(false)
++                                            try { socket.close() } finally {
++                                                session.resources.detach(socket)
++                                                val request = Parcel.obtain()
++                                                val response = Parcel.obtain()
++                                                try {
++                                                    request.writeInterfaceToken(WebListener.DESCRIPTOR)
++                                                    if (!completion.transact(WebListener.FINISH, request, response, 0))
++                                                        throw IOException("Dashboard completion receiver unavailable")
++                                                    response.readException()
++                                                } catch (e: android.os.RemoteException) {
++                                                    Timber.w(e, "Dashboard root entry exited")
++                                                } catch (e: IOException) {
++                                                    Timber.w(e, "Dashboard completion failed; root deadline owns cleanup")
++                                                } finally { response.recycle(); request.recycle() }
++                                            }
++                                        }
++                                    }
++                                    reply?.writeNoException()
++                                    reply?.writeInt(if (owned) 1 else 0)
++                                } finally { if (!owned) descriptor.close() }
++                                return true
 +                            }
 +                        }
-+                    }
-+                } catch (e: IOException) {
++                        val rootJob = async {
++                            server.flow(WebListener(iface, session.gateway, receiver)).collect()
++                        }
++                        val candidate = Closeable { rootJob.cancel() }
++                        if (!session.resources.publish(candidate)) return@supervisorScope
++                        try {
++                            while (session.resources.active && rootJob.isActive && gatewayAddress(iface) == address)
++                                delay(1000)
++                            if (!rootJob.isActive) rootJob.await()
++                        } finally { rootJob.cancel(); rootJob.join() }
++                    } }
++                } catch (e: CancellationException) {
++                    throw e
++                } catch (e: Exception) {
 +                    if (session.resources.active) {
 +                        Timber.e(e, "Dashboard unavailable on %s:8080", address.hostAddress)
 +                        SmartSnackbar.make("Dashboard unavailable on ${address.hostAddress}:8080: ${e.message}").show()
 +                    }
-+                    return
-+                } catch (e: SecurityException) {
-+                    Timber.e(e, "Dashboard bind denied on %s:8080", address.hostAddress)
-+                    SmartSnackbar.make("Dashboard bind denied on ${address.hostAddress}:8080").show()
 +                    return
 +                }
 +            }
@@ -865,6 +1034,173 @@ index 22a174cb..0491a16c 100644
      }
  
      /**
+diff --git a/mobile/src/main/java/be/mygod/vpnhotspot/root/WebListener.kt b/mobile/src/main/java/be/mygod/vpnhotspot/root/WebListener.kt
+new file mode 100644
+index 00000000..9915e686
+--- /dev/null
++++ b/mobile/src/main/java/be/mygod/vpnhotspot/root/WebListener.kt
+@@ -0,0 +1,161 @@
++package be.mygod.vpnhotspot.root
++
++import android.os.Binder
++import android.os.IBinder
++import android.os.Looper
++import android.os.MessageQueue
++import android.os.Parcel
++import android.os.ParcelFileDescriptor
++import android.system.ErrnoException
++import android.system.Os
++import android.system.OsConstants
++import be.mygod.librootkotlinx.ParcelableBoolean
++import be.mygod.librootkotlinx.RootFlow
++import be.mygod.vpnhotspot.DashboardDeadline
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.cancelAndJoin
++import kotlinx.coroutines.currentCoroutineContext
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
++import kotlinx.coroutines.channels.awaitClose
++import kotlinx.coroutines.flow.callbackFlow
++import kotlinx.coroutines.launch
++import kotlinx.parcelize.Parcelize
++import java.io.Closeable
++import java.net.Inet4Address
++import java.net.NetworkInterface
++import java.util.concurrent.atomic.AtomicBoolean
++
++/** A fixed, session-owned entry; never accepts a target port, proxy destination or caller mark. */
++@Parcelize
++internal class WebListener(private val iface: String, private val gateway: String, private val receiver: IBinder) :
++    RootFlow<ParcelableBoolean> {
++    companion object {
++        const val DESCRIPTOR = "be.mygod.vpnhotspot.WebConnection"
++        const val DELIVER = IBinder.FIRST_CALL_TRANSACTION
++        const val FINISH = IBinder.FIRST_CALL_TRANSACTION + 1
++        // A global cap bounds root FDs and simultaneous delivery transactions across downstreams.
++        private val active = java.util.concurrent.Semaphore(16)
++        private val generations = HashMap<String, Job>()
++        private val replacement = Mutex()
++    }
++
++    override fun flow() = callbackFlow {
++        // Await the old owner's finally before binding the same gateway again. This narrow
++        // transition lock does not serialize accept, delivery or HTTP work.
++        val generation = currentCoroutineContext()[Job]!!
++        replacement.withLock {
++            synchronized(generations) { generations[iface] }?.cancelAndJoin()
++            synchronized(generations) { generations[iface] = generation }
++            generation.invokeOnCompletion {
++                // RootFlow runs on the root main looper; replacement also resumes on that owner.
++                synchronized(generations) { if (generations[iface] === generation) generations.remove(iface) }
++            }
++        }
++        val address = NetworkInterface.getByName(iface)?.inetAddresses?.asSequence()
++            ?.filterIsInstance<Inet4Address>()?.singleOrNull()
++        require(address != null && address.hostAddress == gateway) { "Downstream gateway changed" }
++        val rawListener = Os.socket(OsConstants.AF_INET,
++            OsConstants.SOCK_STREAM or OsConstants.SOCK_NONBLOCK or OsConstants.SOCK_CLOEXEC, 0)
++        val listener = try { ParcelFileDescriptor.dup(rawListener) } finally { Os.close(rawListener) }
++        val queue = Looper.myQueue()
++        val lock = Any()
++        val connections = HashSet<Closeable>()
++        var stopped = false
++        try {
++            Os.setsockoptInt(listener.fileDescriptor, OsConstants.SOL_SOCKET, OsConstants.SO_REUSEADDR, 1)
++            /** Linux SO_MARK=36 (uapi asm-generic/socket.h). Same AOSP local-network mark as
++             * shared/model.rs DAEMON_REPLY_MARK: netId 99 | explicitlySelected | protectedFromVpn.
++             * Set before bind/listen so SYN-ACK and accepted sockets inherit the protected route. */
++            Os.setsockoptInt(listener.fileDescriptor, OsConstants.SOL_SOCKET, 36, 0x00030063)
++            Os.bind(listener.fileDescriptor, address, 8080)
++            Os.listen(listener.fileDescriptor, 16)
++            queue.addOnFileDescriptorEventListener(listener.fileDescriptor,
++                MessageQueue.OnFileDescriptorEventListener.EVENT_INPUT) { _, events ->
++                if (events and MessageQueue.OnFileDescriptorEventListener.EVENT_ERROR != 0) {
++                    close(java.io.IOException("Dashboard listener failed"))
++                    return@addOnFileDescriptorEventListener 0
++                }
++                try {
++                    val raw = Os.accept(listener.fileDescriptor, null)
++                    val socket = try { ParcelFileDescriptor.dup(raw) } finally { Os.close(raw) }
++                    if (!active.tryAcquire()) socket.close() else {
++                        val closed = AtomicBoolean()
++                        var delivering = true // keep the global slot while synchronous Binder is in flight
++                        val connection = object : Closeable {
++                            override fun close() {
++                                synchronized(lock) {
++                                    if (!closed.compareAndSet(false, true)) return
++                                    connections.remove(this)
++                                    try {
++                                        try { Os.shutdown(socket.fileDescriptor, OsConstants.SHUT_RDWR) }
++                                        catch (e: ErrnoException) { if (e.errno != OsConstants.ENOTCONN) throw e }
++                                    } finally { try { socket.close() } finally { if (!delivering) active.release() } }
++                                }
++                            }
++                        }
++                        synchronized(lock) {
++                            if (stopped) connection.close() else connections.add(connection)
++                        }
++                        val deadline = DashboardDeadline.arm(connection, 3000)
++                        val delivery = launch(Dispatchers.IO) {
++                            try {
++                                val completion = object : Binder() {
++                                    override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
++                                        if (code != FINISH) return super.onTransact(code, data, reply, flags)
++                                        data.enforceInterface(DESCRIPTOR)
++                                        connection.close()
++                                        deadline.cancel(false)
++                                        reply?.writeNoException()
++                                        return true
++                                    }
++                                }
++                                val data = Parcel.obtain()
++                                val reply = Parcel.obtain()
++                                try {
++                                    data.writeInterfaceToken(DESCRIPTOR)
++                                    synchronized(lock) {
++                                        if (closed.get()) return@launch
++                                        socket.writeToParcel(data, 0)
++                                    }
++                                    data.writeStrongBinder(completion)
++                                    if (!receiver.transact(DELIVER, data, reply, 0))
++                                        throw java.io.IOException("Dashboard FD receiver unavailable")
++                                    reply.readException()
++                                    if (reply.readInt() != 1) connection.close()
++                                } finally { reply.recycle(); data.recycle() }
++                            } catch (e: Exception) {
++                                connection.close()
++                                close(e)
++                            }
++                        }
++                        delivery.invokeOnCompletion {
++                            synchronized(lock) {
++                                delivering = false
++                                if (closed.get()) active.release()
++                            }
++                        }
++                    }
++                } catch (e: ErrnoException) {
++                    if (e.errno != OsConstants.EAGAIN) close(e)
++                } catch (e: Exception) { close(e) }
++                MessageQueue.OnFileDescriptorEventListener.EVENT_INPUT
++            }
++            trySend(ParcelableBoolean(true)).getOrThrow()
++            awaitClose { }
++        } finally {
++            queue.removeOnFileDescriptorEventListener(listener.fileDescriptor)
++            try {
++                synchronized(lock) {
++                    stopped = true
++                    // close removes itself from the live set; cleanup failures still close every FD.
++                    var failure: Exception? = null
++                    while (connections.isNotEmpty()) try { connections.first().close() }
++                    catch (e: Exception) { if (failure == null) failure = e else failure.addSuppressed(e) }
++                    failure?.let { throw it }
++                }
++            } finally { listener.close() }
++        }
++    }
++}
 diff --git a/mobile/src/main/rust/vpnhotspotd/src/dns.rs b/mobile/src/main/rust/vpnhotspotd/src/dns.rs
 index f91ef2ff..2af4ddcf 100644
 --- a/mobile/src/main/rust/vpnhotspotd/src/dns.rs
