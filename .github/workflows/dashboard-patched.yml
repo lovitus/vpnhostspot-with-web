@@ -67,7 +67,7 @@ jobs:
         env:
           DASHBOARD_PAGE_OUTPUT: ${{ runner.temp }}/dashboard.html
         run: python3 tests/run_dashboard_behavior.py "$GITHUB_WORKSPACE/patched"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: Exercise compiled production page in Chromium
